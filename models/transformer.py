@@ -64,7 +64,7 @@ class Transformer(nn.Module):
         print("____check dimension in Transformer_____")
         src = torch.zeros((128, self.d_model, 16, 16))
         mask = torch.zeros((128, 16, 16))
-        query_embed = torch.zeros((25, self.d_model))
+        query_embed = torch.zeros((15, self.d_model))
         pos_embed = torch.zeros((128, 256, 16, 16))
 
         # flatten NxCxHxW to HWxNxC

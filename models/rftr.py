@@ -59,6 +59,8 @@ class RFTR(nn.Module):
         self.stack_num = backbone.stack_num
         self.frame_skip = backbone.frame_skip
 
+        self.num_txrx = num_txrx
+
         dummy_input = torch.zeros((128, self.stack_num//self.frame_skip, num_txrx**2, 768))
         
         self.check_dim(dummy_input)

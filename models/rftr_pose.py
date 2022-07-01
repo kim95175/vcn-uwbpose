@@ -97,8 +97,8 @@ class RFTRpose(nn.Module):
                             method, use_feature=self.feature_type)
            
         self.hm_shape = 64
-
         self.only_feature = False #True
+        self.num_txrx = self.rftr.num_txrx
 
         if method =='simdr':
             #mlp_dim = 64*64
@@ -124,7 +124,7 @@ class RFTRpose(nn.Module):
             self.mlp_head_y = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
         
         
-        dummy_input = torch.zeros((4, int(self.rftr.stack_num//self.rftr.frame_skip), 64, 768))
+        dummy_input = torch.zeros((4, int(self.rftr.stack_num//self.rftr.frame_skip), self.num_txrx**2, 768))
         self.check_dim(dummy_input)
 
     #def forward(self, samples: NestedTensor, features: Tensor):
@@ -294,7 +294,7 @@ class PoseHeadSmallConv(nn.Module):
     Upsampling is done using a FPN approach
     """
 
-    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x', use_seg=False):
+    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x'):
         super().__init__()
         
         inter_dims =[context_dim, context_dim // 2, context_dim // 4]   
@@ -340,20 +340,22 @@ class PoseHeadSmallConv(nn.Module):
         self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
         
         self.use_feature = use_feature
-        self.use_seg = use_seg
         #self.out_lay = torch.nn.Conv2d(inter_dims[2], 1, 3, padding=1)
         #self.adapter1 = torch.nn.Conv2d(256, inter_dims[1], 1)
 
         self.method = method
         self.dim = dim
         self.inplanes= inter_dims[-1]
+        self.heatmap_size = [64, 64]
 
         self.deconv_with_bias = False
+
+        self.hm_method = 'mlp' if method in ['hm'] else 'deconv'
 
         if method in ['simdr']:
             self.num_deconv_filters =[64, 52]#[64, 32]
             #self.num_deconv_filters =[64, 52, 20]
-        elif  method in ['hm']:
+        elif method in ['hm']:
             if use_feature == 'x':
                 self.num_deconv_filters =[128, 64]
             else:
@@ -362,43 +364,25 @@ class PoseHeadSmallConv(nn.Module):
             self.num_deconv_filters =[64, 52]
             
   
-        self.deconv_layers = self._make_deconv_layer(
-            len(self.num_deconv_filters),  # NUM_DECONV_LAYERS
-            self.num_deconv_filters,  # NUM_DECONV_FILTERS
-            [4] * len(self.num_deconv_filters),  # NUM_DECONV_KERNERLS
-        ) 
-        
-
-        final_inchan = self.num_deconv_filters[-1]
-        
-        if self.use_seg:
-            final_inchan += 16
-            final_outchan = 32
-        
-            self.deconv_layers2 = nn.Sequential(
-                    nn.Conv2d(
-                        in_channels=final_inchan, 
-                        out_channels=final_outchan,  
-                        kernel_size=2,
-                        stride=2, #2 # 1
-                        padding=0),
-                    nn.BatchNorm2d(final_outchan, momentum=BN_MOMENTUM),
-                    nn.ReLU(inplace=True),
-
-                    nn.ConvTranspose2d(
-                        in_channels=final_outchan,
-                        out_channels=32,
-                        kernel_size=4,
-                        stride=2,
-                        padding=1,
-                        output_padding=0,
-                        bias=False),
-                    nn.BatchNorm2d(32, momentum=BN_MOMENTUM),
-                    nn.ReLU(inplace=True),
+        if self.hm_method == 'mlp':
+            dim = 16*16 # 64*4
+            hidden_heatmap_dim = self.heatmap_size[0] * 16
+            heatmap_dim = self.heatmap_size[0]* self.heatmap_size[1]
+            self.mlp_head = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, hidden_heatmap_dim),
+                nn.LayerNorm(hidden_heatmap_dim),
+                nn.Linear(hidden_heatmap_dim, heatmap_dim)
             )
-
-            final_inchan = 32
-
+            final_inchan = inter_dims[2]
+        else:
+            self.deconv_layers = self._make_deconv_layer(
+                len(self.num_deconv_filters),  # NUM_DECONV_LAYERS
+                self.num_deconv_filters,  # NUM_DECONV_FILTERS
+                [4] * len(self.num_deconv_filters),  # NUM_DECONV_KERNERLS
+            ) 
+            final_inchan = self.num_deconv_filters[-1]
+        
         if method in ['simdr']:
             self.final_layer = nn.Conv2d(
                 in_channels=final_inchan, 
@@ -456,7 +440,12 @@ class PoseHeadSmallConv(nn.Module):
         x = self.gn3(x)
         x = F.relu(x)
           
-        x = self.deconv_layers(x)
+        if self.hm_method == 'mlp':
+            x = x.flatten(2)
+            x = self.mlp_head(x)
+            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
+        else:
+            x = self.deconv_layers(x)
 
         x = self.final_layer(x)
         
@@ -491,7 +480,7 @@ class PoseHeadSmallConv(nn.Module):
     def check_dim(self):
         print("____check dim in PoseHeadSmallConv____") # src_proj =  batch, src_proj_c, h, w    bbx_mask = batch, num_queries, nheads, h, w
         x = torch.zeros((4, self.dim-8, 16, 16))
-        bbox_mask = torch.zeros((4,25,8, 16, 16))
+        bbox_mask = torch.zeros((4,15,8, 16, 16))
         print("x, bbox_mask", x.shape, bbox_mask.shape)
         
         x = torch.cat([_expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
@@ -539,8 +528,15 @@ class PoseHeadSmallConv(nn.Module):
         x = F.relu(x)
         print("lay3 x ", x.shape) 
 
-        x = self.deconv_layers(x)
-        print("deconv x ", x.shape) 
+        if self.hm_method == 'mlp':
+            x = x.flatten(2)
+            x = self.mlp_head(x)
+            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
+            print("mlp head x ", x.shape) 
+        
+        else:
+            x = self.deconv_layers(x)
+            print("deconv x ", x.shape) 
         x = self.final_layer(x)
         print("final x ", x.shape) 
 

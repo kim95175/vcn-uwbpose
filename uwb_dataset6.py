@@ -602,9 +602,9 @@ class UWBDataset(Dataset):
                 rand_idx[rand_idx<0.8] = 0
                 rand_idx = rand_idx.to(dtype=torch.bool)
                 rf[rand_idx] = torch.zeros((1024-self.cutoff,))
-            
-            #if random.random() < 0. and self.mode == 'train':
-            if False:
+
+            if random.random() < 0.5 and self.mode == 'train':
+            #if False:
                 #print(rf.shape)
                 mask = (torch.rand(rf.shape[0], *rf.shape[2:]) < 0.02).float()
                 block_mask = F.max_pool1d(input=mask[:, None, :],
