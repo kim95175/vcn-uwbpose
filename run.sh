@@ -20,11 +20,11 @@
 #python main.py --batch_size 128 --epochs 50 --pose simdr --output_dir weights/rftr0_mlpsimdr/ --frozen_weights weights/rftr0/rftr0_200.pth --device cuda:1 --model_debug
 
 
-python main.py --batch_size 128 --epochs 50 --pose hm --output_dir weights/rftr0_mlp/ --frozen_weights weights/rftr0/rftr0_200.pth --model_debug
+#python main.py --batch_size 128 --epochs 50 --pose hm --output_dir weights/rftr0_mlp/ --frozen_weights weights/rftr0/rftr0_200.pth --model_debug
 
 
 #python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2 --feature 16 --model_debug
-#python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2_mlp --box_feature 16 --model_debug
+python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2_mlp2 --box_feature 16 --lr 0.0004 --device cuda:1
 
 
 #python main.py --batch_size 64 --pose hmdr --epochs 50 --frozen_weights weights/rftr15_q15/checkpoint0199.pth --output_dir weights/rftr15_posehmdr_ssim/ --num_queries 15 --feature 16 --model_debug

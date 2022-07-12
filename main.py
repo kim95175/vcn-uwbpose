@@ -216,8 +216,8 @@ def main(args):
     elif args.lr_scheduler =='cosine':
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr_min, weight_decay=args.weight_decay)
         #lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=1, eta_max=args.lr,  T_up=5, gamma=0.5)
-        lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=50, T_mult=1, eta_max=args.lr,  T_up=10, gamma=0.5)
-        #lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=1, eta_max=args.lr,  T_up=5, gamma=0.5)
+        #lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=50, T_mult=1, eta_max=args.lr,  T_up=10, gamma=0.5)
+        lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=1, eta_max=args.lr,  T_up=10, gamma=0.5)
     
     
     if args.frozen_weights is not None:
