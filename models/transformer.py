@@ -20,7 +20,7 @@ class Transformer(nn.Module):
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False):
+                 return_intermediate_dec=False, box_feature='x'):
         super().__init__()
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -38,6 +38,7 @@ class Transformer(nn.Module):
 
         self.d_model = d_model
         self.nhead = nhead
+        self.box_feature = box_feature
         
         self.check_dim()
 
@@ -46,13 +47,17 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, mask, query_embed, pos_embed):
+    def forward(self, src, mask, query_embed, pos_embed, vc = None):
         # flatten NxCxHxW to HWxNxC
         bs, c, h, w = src.shape
         src = src.flatten(2).permute(2, 0, 1)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1) if pos_embed is not None else pos_embed
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1) 
         mask = mask.flatten(1)
+
+        if vc is not None:
+            vc = vc.permute(1, 0, 2)
+            query_embed = torch.cat((query_embed, vc), dim = 0)
 
         tgt = torch.zeros_like(query_embed)
         memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed)
@@ -64,8 +69,12 @@ class Transformer(nn.Module):
         print("____check dimension in Transformer_____")
         src = torch.zeros((128, self.d_model, 16, 16))
         mask = torch.zeros((128, 16, 16))
-        query_embed = torch.zeros((15, self.d_model))
-        pos_embed = torch.zeros((128, 256, 16, 16))
+        query_embed = torch.zeros((16, self.d_model))
+        pos_embed = torch.zeros((128, self.d_model, 16, 16))
+
+        if self.box_feature != 'x':
+            vc = torch.zeros((128, 16, self.d_model))
+            vc = vc.permute(1, 0, 2)
 
         # flatten NxCxHxW to HWxNxC
         #src = src.flatten(2).permute(2, 0, 1)
@@ -74,6 +83,13 @@ class Transformer(nn.Module):
         src = src.flatten(2).permute(2, 0, 1)
         pos_embed = pos_embed.flatten(2).permute(2, 0, 1) if pos_embed is not None else pos_embed
         query_embed = query_embed.unsqueeze(1).repeat(1, bs, 1) 
+
+        if self.box_feature != 'x':
+            print(f"query embed({query_embed.shape})+ vc({vc.shape})")
+            query_embed = torch.cat((query_embed, vc), dim = 0)
+            print(f"= {query_embed.shape}")
+
+
         mask = mask.flatten(1)
         print(f"transofmer input after flatten  src (HWxNXC): {src.shape}, mask : {mask.shape}", \
                    f"\n query_embed {query_embed.shape}")
@@ -83,7 +99,7 @@ class Transformer(nn.Module):
         print(f"after memory = self.encoder(src, src_key_padding_mask=mask, pos=pos_embed) = {memory.shape}")
         hs = self.decoder(tgt, memory, memory_key_padding_mask=mask,
                           pos=pos_embed, query_pos=query_embed)
-        print(f"decoder input : tgt = {tgt.shape}, query = {query_embed.shape}")
+        print(f"decoder input : tgt = {tgt.shape}, pos={pos_embed.shape}, query_pos = {query_embed.shape}")
         print(f"after hs = self.decoder(tgt, memory, memory_key_padding_mask=mask, pos=pos_embed, query_pos=query_embed) = {hs.shape}")
         
         print(f"output = hs.transpose(1, 2) : {hs.transpose(1, 2).shape}, memory.permute(1, 2, 0).view(bs, c, h, w) : {memory.permute(1, 2, 0).view(bs, c, h, w).shape}")
@@ -122,7 +138,7 @@ class TransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.norm = norm
         self.return_intermediate = return_intermediate
-        print(f"transformer num_encoder = {self.num_layers}")
+        print(f"transformer num_decoder = {self.num_layers}")
 
     def forward(self, tgt, memory,
                 tgt_mask: Optional[Tensor] = None,
@@ -315,6 +331,7 @@ def build_transformer(args):
         num_decoder_layers=args.dec_layers,
         normalize_before=args.pre_norm,
         return_intermediate_dec=True,
+        box_feature = args.box_feature
     )
 
 

@@ -599,6 +599,57 @@ def vis_featuremap(imgs, targets, outputs ,features, img_dir=None):
 
     return 0
 
+
+def vis_gram(imgs, targets, outputs, features, img_dir=None):
+    
+    #print("==============vis_gram matrix ==============")
+    #img_dir = 'results/mask_cnn/rftr_fm/'
+    if img_dir is not None:
+        os.makedirs(img_dir, exist_ok=True)
+    #print(targets, results)
+    batch_size = len(imgs)
+    # ground truth data
+    
+    img_size = 128
+    
+    for b in range(batch_size):
+        if b !=0:
+            continue
+        ids = targets[b]['image_id']
+        img = imgs[b]
+        img = cv2.resize(img, (img_size, img_size), interpolation=cv2.INTER_AREA)
+        
+        pred_img_feature = outputs['pred_feature'][b]
+        rf_feature = outputs['tgt_feature'][b]#.cpu().numpy()
+          
+        gray_rf = rf_feature.clone()
+        min = float(gray_rf.min())
+        max = float(gray_rf.max())
+        print("pred gram min max", min, max)
+        gray_rf.add_(-min).div_(max - min + 1e-5)
+        gray_rf = gray_rf.mul(255).clamp(0, 255)\
+                                .byte().cpu().numpy()
+        gray_rf = cv2.resize(gray_rf, (img_size, img_size))
+        gray_rf = gray_rf[:, :, None]#.repeat(3, axis=2)
+        gray_rf = cv2.applyColorMap(gray_rf, cv2.COLORMAP_JET)
+
+        gray_pred_img = pred_img_feature.clone()
+        min = float(gray_pred_img.min())
+        max = float(gray_pred_img.max())
+
+        print("tgt gram min max", min, max)
+        gray_pred_img.add_(-min).div_(max - min + 1e-5)
+        gray_pred_img = gray_pred_img.mul(255).clamp(0, 255)\
+                                .byte().cpu().numpy()
+        gray_pred_img = cv2.resize(gray_pred_img, (img_size, img_size))
+        gray_pred_img = gray_pred_img[:, :, None]#.repeat(3, axis=2)
+        gray_pred_img = cv2.applyColorMap(gray_pred_img, cv2.COLORMAP_JET)
+
+        res= np.concatenate((img, gray_rf, gray_pred_img), axis=1)
+        cv2.imwrite(os.path.join(img_dir, str()) +'_{}_gram.png'.format(ids), res)
+        
+    return 0
+
 def save_pred_feature(imgs, targets, outputs ):
     
     

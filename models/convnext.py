@@ -140,12 +140,13 @@ class ConvNeXt(nn.Module):
         head_init_scale (float): Init scaling value for classifier weights and biases. Default: 1.
     """
     def __init__(self, stack_num=16, frame_skip=4,
-                 depths=[3, 3, 9, 3], 
+                 depths=[3, 3, 18, 3], 
                  dims=[96, 192, 384, 768], 
                  drop_path_rate=0., 
                  drop_prob = 0.2, #0.2,
                  drop_size = 4,
                  num_txrx = 8,
+                 box_feature = 'x',
                  layer_scale_init_value=1.0, #1e-6, 
                  ):
         super().__init__()
@@ -159,6 +160,35 @@ class ConvNeXt(nn.Module):
         self.frame_skip = frame_skip
         self.depths = depths
 
+        self.box_feature = box_feature
+
+        if self.box_feature != 'x':
+            self.vcn_depths = [3, 3, 18, 3]
+            self.vcn_downsample_layers = nn.ModuleList()
+            self.vcn_stages = nn.ModuleList()
+            
+            dim = 128  # 16*8
+            hidden_featuremap_dim = 16*8
+            featuremap_dim = 16*16
+            self.mlp_head = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, hidden_featuremap_dim),
+                nn.LayerNorm(hidden_featuremap_dim),
+                nn.Linear(hidden_featuremap_dim, featuremap_dim)
+            )
+            self.vcn_final_layer = nn.Sequential(
+                #nn.BatchNorm1d(dims[-1], momentum=0.1),
+                nn.Conv1d(
+                    in_channels=dims[-1], #64,#dims[-1], #self.num_deconv_filters[-1],  # NUM_DECONV_FILTERS[-1]
+                    out_channels=256,#=32,  # NUM_JOINTS,
+                    kernel_size=1,  # FINAL_CONV_KERNEL
+                    stride=1,
+                    padding=0  # if FINAL_CONV_KERNEL = 3 else 1
+                )
+                #LayerNorm(256, eps=1e-6, data_format="channels_first"),
+            ) 
+
+
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
             nn.Conv1d(in_chans, dims[0], kernel_size=3, stride=3),
@@ -167,18 +197,27 @@ class ConvNeXt(nn.Module):
         )
         self.downsample_layers.append(stem)
         for i in range(3):
-            if False:
-            #if i == 1:
-                downsample_layer = nn.Sequential(
-                        LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                        nn.Conv1d(dims[i], dims[i+1], kernel_size=3, stride=3),
-                )
-            else:
-                downsample_layer = nn.Sequential(
-                        LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                        nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
-                )
+            downsample_layer = nn.Sequential(
+                    LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                    nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
+            )
             self.downsample_layers.append(downsample_layer)
+            if self.box_feature != 'x' and i >= 1:
+                
+
+                if i == 1:
+                    vcn_downsample_layer = nn.Sequential(
+                            LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                            nn.Conv1d(dims[i], dims[i+1], kernel_size=2, stride=2),
+                    )
+                elif i == 2:
+                    vcn_downsample_layer = nn.Sequential(
+                            LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                            nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
+                    )
+                self.vcn_downsample_layers.append(vcn_downsample_layer)
+
+
 
         self.stages = nn.ModuleList() # 4 feature resolution stages, each consisting of multiple residual blocks
         dp_rates=[x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
@@ -190,8 +229,17 @@ class ConvNeXt(nn.Module):
                 layer_scale_init_value=layer_scale_init_value) for j in range(depths[i])]
             )
             self.stages.append(stage)
-            cur += depths[i]
+            
+            if self.box_feature != 'x':
+                if i >= 2:
+                    vcn_stage = nn.Sequential(
+                        *[Block(dim=dims[i], drop_path=dp_rates[cur + j], 
+                        layer_scale_init_value=layer_scale_init_value) for j in range(self.vcn_depths[i])]
+                    )
+                    self.vcn_stages.append(vcn_stage)
 
+            
+            cur += depths[i]
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
         self.apply(self._init_weights)
 
@@ -219,42 +267,145 @@ class ConvNeXt(nn.Module):
         if isinstance(m, (nn.Conv1d, nn.Linear)):
             trunc_normal_(m.weight, std=.02)
             nn.init.constant_(m.bias, 0)
-
+    '''
     def forward_features(self, x):
-        for i in range(4):
-            x = self.downsample_layers[i](x)
-            x = self.stages[i](x)
-            if i==2 or i==3:
-                if self.drop_block is not None:
-                    x = self.drop_block(x)
-        return x #self.norm(x.mean([-2, -1])) # global average pooling, (N, C, H, W) -> (N, C)
+        
+        
+        x = self.downsample_layers[0](x)
+        x = self.stages[0](x)
+
+        x = self.downsample_layers[1](x)
+        x = self.stages[1](x)
+
+        if self.box_feature != 'x':
+            vc = self.vcn_downsample_layers[0](x)
+            vc = self.vcn_stages[0](vc)
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+            vc = self.vcn_downsample_layers[1](x)
+            vc = self.vcn_stages[1](vc)
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+
+        x = self.downsample_layers[2](x)
+        x = self.stages[2](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+
+        x = self.downsample_layers[3](x)
+        x = self.stages[3](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+
+        if self.box_feature != 'x':
+            return x, vc
+        else:
+            return x #self.norm(x.mean([-2, -1])) # global average pooling, (N, C, H, W) -> (N, C)
+    '''
 
     def forward(self, input_tensor): #tensor_list: NestedTensor):
-        #xs = OrderedDict()
-        #input = tensor_list.tensors
+
         if self.drop_block is not None:
             self.drop_block.step()
+
         x = rearrange(input_tensor, 'b t n d -> b (t n) d')
-        x = self.forward_features(x)
+
+        x = self.downsample_layers[0](x)
+        x = self.stages[0](x)
+
+        x = self.downsample_layers[1](x)
+        x = self.stages[1](x)
+
+        if self.box_feature != 'x':
+            vc = self.vcn_downsample_layers[0](x)
+            vc = self.vcn_stages[0](vc)
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+            vc = self.vcn_downsample_layers[1](vc)
+            vc = self.vcn_stages[1](vc)
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+            
+            vc = self.mlp_head(vc)
+
+            vc = self.vcn_final_layer(vc)
+
+        x = self.downsample_layers[2](x)
+        x = self.stages[2](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+
+        x = self.downsample_layers[3](x)
+        x = self.stages[3](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+
 
         b, n, d = x.shape
         root_t = int(d**0.5)
         x = rearrange(x, 'b n (t1 t2) -> b n t1 t2', t1=root_t)
-
         mask = torch.zeros((b, root_t, root_t), dtype=torch.bool, device=input_tensor.device)
-        return x, mask, None
+
+        if self.box_feature != 'x':
+            vc = rearrange(vc, 'b n (t1 t2) -> b n t1 t2', t1=root_t)
+            return x, mask, vc
+        else:
+            return x, mask, None
     
         
     def check_dim(self):
         print("____check dimension in ConvNeXtBackbone6_____")        
         x = torch.zeros((128, self.input_d, 768))
         print("input = ", x.shape)
+        '''
         for i in range(4):
             x = self.downsample_layers[i](x)
             print(f"{i} downsample layer = {x.shape}")
             x = self.stages[i](x)
             print(f"{i} stage = {x.shape} x {self.depths[i]}")
+        '''
+        x = self.downsample_layers[0](x)
+        print(f"0 downsample layer = {x.shape}")
+        x = self.stages[0](x)
+        print(f"0 stage = {x.shape} x {self.depths[0]}")
 
+        x = self.downsample_layers[1](x)
+        x = self.stages[1](x)
+        print(f"1 stage = {x.shape} x {self.depths[1]}")
+
+        if self.box_feature != 'x':
+            vc = self.vcn_downsample_layers[0](x)
+            print(f"[vc]2 downsample layer = {vc.shape}")
+            vc = self.vcn_stages[0](vc)
+            print(f"[vc]2 stage = {vc.shape} x {self.vcn_depths[2]}")
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+            
+            vc = self.vcn_downsample_layers[1](vc)
+            print(f"[vc]2 downsample layer = {vc.shape}")
+            vc = self.vcn_stages[1](vc)
+            print(f"[vc]3 stage = {vc.shape} x {self.vcn_depths[3]}")
+            if self.drop_block is not None:
+                vc = self.drop_block(vc)
+            vc = self.mlp_head(vc)
+            print(f"[vc]mlp stage = {vc.shape}")
+            vc = self.vcn_final_layer(vc)
+            print(f"[vc]final stage = {vc.shape}")
+
+
+        x = self.downsample_layers[2](x)
+        print(f"2 downsample layer = {x.shape}")
+        x = self.stages[2](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+        print(f"2 stage = {x.shape} x {self.depths[2]}")
+
+        x = self.downsample_layers[3](x)
+        print(f"3 downsample layer = {x.shape}")
+        x = self.stages[3](x)
+        if self.drop_block is not None:
+            x = self.drop_block(x)
+        print(f"3 stage = {x.shape} x {self.depths[3]}")
 
 
 
@@ -290,14 +441,21 @@ class Joiner(nn.Sequential):
         self.stack_num = backbone.stack_num
         self.frame_skip = backbone.frame_skip
         self.num_channels = backbone.num_channels
+        self.box_feature = backbone.box_feature
 
     def forward(self, tensor):
-        src, mask, _ = self[0](tensor)
+        src, mask, vc = self[0](tensor)
         pos = self[1](src, mask).to(src.dtype)
-        
-        return src, mask, pos
+        return src, mask, pos, vc
 
 def build_convbackbone(args):
+
+    if args.model =='s':
+        dim = [96, 192, 384, 768]
+    elif args.model =='m':
+        dim = [96, 192, 384, 768]
+    elif args.model =='l':
+        dim = [128, 256, 512, 1024]
 
     backbone = ConvNeXt(stack_num=args.stack_num, 
                     frame_skip=args.frame_skip, 
@@ -305,7 +463,9 @@ def build_convbackbone(args):
                     drop_path_rate=args.drop_prob,
                     drop_prob=args.dropblock_prob,
                     drop_size=args.drop_size,
-                    num_txrx =args.num_txrx)
+                    num_txrx =args.num_txrx,
+                    box_feature=args.box_feature
+                    )
     #return backbone
     if args.position_embedding is not 'none':
         position_embedding = build_position_encoding(args)

@@ -20,7 +20,7 @@ import numpy as np
 import util.misc as utils
 from util import box_ops
 from evaluate import AP, mAP, mIOU, mkpIOU, class_ap, pose_AP
-from visualize import save_batch_heatmaps, visualize_result, vis_featuremap, save_pred_feature
+from visualize import save_batch_heatmaps, visualize_result, vis_featuremap, save_pred_feature, vis_gram
 
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
@@ -114,7 +114,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 def evaluate(model, criterion, postprocessors, 
                 data_loader, device, output_dir, val_vis=False, 
                 is_pose='simdr', img_dir = None, boxThrs=0.5, 
-                epoch=-1, dr_size = 512, feature_type: str ='x'):
+                epoch=-1, dr_size = 512, feature_type: str ='x', soft_nms=False):
     output_folder = img_dir
     model.eval()
     criterion.eval()
@@ -125,6 +125,8 @@ def evaluate(model, criterion, postprocessors,
 
     #ap_threshold_list = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95]
     ap_threshold_list = [0.5]
+    #if epoch == -1:
+    #    ap_threshold_list += [0.75]
 
     ap_metric = []
     if 'bbox' in postprocessors.keys():
@@ -200,13 +202,10 @@ def evaluate(model, criterion, postprocessors,
 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         if 'bbox' in postprocessors.keys():
-            results = postprocessors['bbox'](outputs, orig_target_sizes)
+            results = postprocessors['bbox'](outputs, orig_target_sizes, nms=soft_nms)
         if 'posedr' in postprocessors.keys():
             res_pose = postprocessors['posedr'](results, outputs)
-            
-            #if feature_type != 'x' and val_vis:
-            #    vis_featuremap(imgs, targets, outputs, features, img_dir)
-            
+                
             if val_vis and 'pred_hm' in outputs:
                 batch_hm = outputs['pred_hm']
                 save_batch_heatmaps(imgs, batch_hm, targets, img_dir, results)
@@ -214,6 +213,10 @@ def evaluate(model, criterion, postprocessors,
 
         elif 'posehm' in postprocessors.keys():
             res_pose = postprocessors['posehm'](results, outputs, targets)
+            #if feature_type != 'x' and val_vis:
+            #    vis_featuremap(imgs, targets, outputs, features, img_dir)
+                #vis_gram(imgs, targets, outputs, features, img_dir)
+
             if val_vis:
                 batch_hm = outputs['pred_hm']
                 save_batch_heatmaps(imgs, batch_hm, targets, img_dir, results)

@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from torch import nn
 torch.backends.cudnn.benchmark = True
 from einops.einops import rearrange
+from einops.layers.torch import Rearrange
+import numpy as np
 
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
@@ -28,7 +30,7 @@ from .transformer import build_transformer
 
 class RFTR(nn.Module):
     """ This is the Person Detection Network module that performs eprson detection """
-    def __init__(self, backbone, transformer, num_classes, num_queries, num_txrx=8, aux_loss=False):
+    def __init__(self, backbone, transformer, num_classes, num_queries, num_txrx=8, aux_loss=False, box_feature='x'):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -52,8 +54,7 @@ class RFTR(nn.Module):
                 LayerNorm(backbone.num_channels, eps=1e-6, data_format="channels_first"),
                 nn.Conv1d(backbone.num_channels, hidden_dim, kernel_size=1),
         )
-
-
+        
         self.backbone = backbone
         self.aux_loss = aux_loss
         self.stack_num = backbone.stack_num
@@ -61,11 +62,27 @@ class RFTR(nn.Module):
 
         self.num_txrx = num_txrx
 
+        self.box_feature = box_feature
+        #print(use_feature)
+        if box_feature is not 'x':
+            print("use visual clue query")
+            patch_size = 4
+            patch_dim = patch_size * patch_size * 256
+            
+            self.to_patch_embedding = nn.Sequential(
+                Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
+                nn.Linear(patch_dim, patch_dim//patch_size),
+                nn.LayerNorm(patch_dim//patch_size),
+                nn.Linear(patch_dim//patch_size, hidden_dim),
+            )
+
+            #self.feature_embed = MLP(hidden_dim, hidden_dim//2, hidden_dim, 2)
+
         dummy_input = torch.zeros((128, self.stack_num//self.frame_skip, num_txrx**2, 768))
         
         self.check_dim(dummy_input)
 
-    def forward(self, samples):
+    def forward(self, samples, targets=None):
         """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
@@ -81,20 +98,29 @@ class RFTR(nn.Module):
                                 dictionnaries containing the two above keys for each decoder layer.
         """
 
-        pos = None
-        src, mask, pos = self.backbone(samples)
+        pos, vc_query = None, None
+        src, mask, pos, vc = self.backbone(samples)
+        if vc is not None:
+            vc_query = self.to_patch_embedding(vc)
         assert mask is not None
-        
+
         src = src.flatten(2)
         input_proj = self.input_proj(src)
         input_proj = rearrange(input_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
-        hs = self.transformer(input_proj, mask, self.query_embed.weight, pos)[0]
+        hs = self.transformer(input_proj, mask, self.query_embed.weight, pos, vc_query)[0]
         hs = hs[-1]
+
+        if self.box_feature:
+            hs = hs[:, :self.num_queries, :]
+
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
         out = {'pred_logits': outputs_class, 'pred_boxes': outputs_coord}
         #out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
         
+        if self.box_feature != 'x':
+            out['pred_feature'] = vc
+
         if self.aux_loss:
             out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
         
@@ -107,24 +133,35 @@ class RFTR(nn.Module):
         print(f"input shape : {samples.shape}")
 
         #features= self.backbone(samples)
-        pos = None
+        pos, vc_query= None, None
         #src, mask = features['0'].decompose()
-        src, mask, pos = self.backbone(samples)
+        src, mask, pos, vc = self.backbone(samples)
         print(f"backbone = src : {src.shape}, mask : {mask.shape}")
         if pos is not None:
             print("position embedding = ", pos.shape)
+        if vc is not None:
+            print("visual clue = ", vc.shape)
+            vc_query = self.to_patch_embedding(vc)
+            print("visual clue to patch = ", vc_query.shape)
+
         assert mask is not None
         
         src = src.flatten(2)
         input_proj = self.input_proj(src)
         input_proj = rearrange(input_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
 
+        
         print(f"transofmer input self.input_proj(src) : {input_proj.shape}, mask : {mask.shape}", \
                 f"\n self.query_embed.weight {self.query_embed.weight.shape}")
-        hs = self.transformer(input_proj, mask, self.query_embed.weight, pos)[0]
+        hs = self.transformer(input_proj, mask, self.query_embed.weight, pos, vc_query)[0]
         print(f"hs(decoder) = {hs.shape}")
         
         hs = hs[-1]
+
+        if self.box_feature:
+            hs = hs[:, :self.num_queries, :]
+            print(f"hs(decoder) without vc = {hs.shape}")
+                    
         outputs_class = self.class_embed(hs)
         outputs_coord = self.bbox_embed(hs).sigmoid()
         print("after ffn ", outputs_class.shape, outputs_coord.shape)
@@ -318,9 +355,13 @@ class SetCriterion(nn.Module):
         """
         #print("-------------loss_feature-----")
         assert 'pred_feature' in outputs
+    
         src_feature = outputs['pred_feature']  #(idx_num, )
         batch_size = src_feature.size(0)
-        
+        '''
+        tgt_feature = outputs['tgt_feature']
+        tgt_feature = tgt_feature.to(src_feature)
+        '''
         tgt_feature = [t["features"] for t in targets]
         tgt_feature, valid = nested_tensor_from_tensor_list(tgt_feature).decompose()
         tgt_feature = tgt_feature.to(src_feature)
@@ -331,6 +372,7 @@ class SetCriterion(nn.Module):
         features_gt = tgt_feature.reshape((batch_size, -1))
         #print(features_pred[0].shape, features_gt[0].shape)
         feature_loss = self.feature_criterion(features_pred, features_gt)
+        #feature_loss = nn.functional.l1_loss(features_pred, features_gt)
         '''
         #msssim loss
         feature_loss = self.feature_criterion(src_feature, tgt_feature)
@@ -414,11 +456,73 @@ class SetCriterion(nn.Module):
 
         return losses
 
+def soft_nms_pytorch(dets, box_scores, sigma=0.5, thresh=0., cuda=1):
+    """
+    Build a pytorch implement of Soft NMS algorithm.
+    # Augments
+        dets:        boxes coordinate tensor (format:[y1, x1, y2, x2])
+        box_scores:  box score tensors
+        sigma:       variance of Gaussian function
+        thresh:      score thresh
+        cuda:        CUDA flag
+    # Return
+        the index of the selected boxes
+    """
+
+    # Indexes concatenate boxes with the last column
+    N = dets.shape[0]
+    if cuda:
+        #indexes = torch.arange(0, N, dtype=torch.float).cuda().view(N, 1)
+        indexes = torch.arange(0, N, dtype=torch.float).view(N, 1).to(dets)
+    else:
+        indexes = torch.arange(0, N, dtype=torch.float).view(N, 1)
+    dets = torch.cat((dets, indexes), dim=1)
+    #print(dets)
+    # The order of boxes coordinate is [y1,x1,y2,x2]
+    x1 = dets[:, 0]
+    y1 = dets[:, 1]
+    x2 = dets[:, 2]
+    y2 = dets[:, 3]
+    scores = box_scores
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    for i in range(N):
+        # intermediate parameters for later parameters exchange
+        tscore = scores[i].clone()
+        pos = i + 1
+
+        if i != N - 1:
+            maxscore, maxpos = torch.max(scores[pos:], dim=0)
+            if tscore < maxscore:
+                dets[i], dets[maxpos.item() + i + 1] = dets[maxpos.item() + i + 1].clone(), dets[i].clone()
+                scores[i], scores[maxpos.item() + i + 1] = scores[maxpos.item() + i + 1].clone(), scores[i].clone()
+                areas[i], areas[maxpos + i + 1] = areas[maxpos + i + 1].clone(), areas[i].clone()
+
+        # IoU calculate
+        yy1 = np.maximum(dets[i, 0].to("cpu").numpy(), dets[pos:, 0].to("cpu").numpy())
+        xx1 = np.maximum(dets[i, 1].to("cpu").numpy(), dets[pos:, 1].to("cpu").numpy())
+        yy2 = np.minimum(dets[i, 2].to("cpu").numpy(), dets[pos:, 2].to("cpu").numpy())
+        xx2 = np.minimum(dets[i, 3].to("cpu").numpy(), dets[pos:, 3].to("cpu").numpy())
+        
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = torch.tensor(w * h).to(dets) if cuda else torch.tensor(w * h)
+        ovr = torch.div(inter, (areas[i] + areas[pos:] - inter))
+
+        # Gaussian decay
+        weight = torch.exp(-(ovr * ovr) / sigma)
+        scores[pos:] = weight * scores[pos:]
+
+    # select the boxes and keep the corresponding indexes
+    #keep = dets[:, 4][scores > thresh].int()
+    keep = dets[:, 4].int()
     
+
+    return dets[:, :4], scores, keep
+
 class PostProcess(nn.Module):
     """ This module converts the model's output into the format expected by the coco api"""
     @torch.no_grad()
-    def forward(self, outputs, target_sizes):
+    def forward(self, outputs, target_sizes, nms=False):
         """ Perform the computation
         Parameters:
             outputs: raw outputs of the model
@@ -433,7 +537,9 @@ class PostProcess(nn.Module):
 
         #batch_size = out_bbox.shape[0]
         prob = F.softmax(out_logits, -1)
-        scores, labels = prob[..., :-1].max(-1)
+        #print(prob.shape)
+        #print(prob[..., :-1].shape)
+        scores, labels = prob[..., :-1].max(-1) # No Obejct는 제외함
         
         # convert to [x0, y0, x1, y1] format
         boxes = box_ops.box_cxcywh_to_xyxy(out_bbox)
@@ -442,7 +548,22 @@ class PostProcess(nn.Module):
         scale_fct = torch.stack([img_w, img_h, img_w, img_h], dim=1)
         boxes = boxes * scale_fct[:, None, :]
 
-        results = [{'scores': s, 'labels': l, 'boxes': b} for s, l, b in zip(scores, labels, boxes)]
+        batch_size, N = boxes.shape[0], boxes.shape[1]
+        indices = torch.zeros((batch_size, N))
+        if nms:
+            #print("box, score", boxes.shape, scores.shape)
+            for b in range(batch_size):
+                dets = boxes[b]
+                score = scores[b]
+                #print(boxes[b], scores[b])
+                boxes[b], scores[b], keep = soft_nms_pytorch(dets, score)
+                labels[b] = torch.index_select(labels[b], 0, keep)
+                indices[b] = keep
+        else:
+            for b in range(batch_size):
+                indices[b] = torch.arange(0, N, dtype=torch.float)
+        #print(indices)
+        results = [{'scores': s, 'labels': l, 'boxes': b, 'indices': idx} for s, l, b, idx in zip(scores, labels, boxes, indices)]
 
         return results
 
@@ -467,36 +588,19 @@ def build_rftr(args):
     num_classes = 91    
     device = torch.device(args.device)
 
-    if args.feature_train:
-        matcher = build_matcher(args)
-        model = build_ftr_backbone(args)
-        weight_dict = {'loss_feature' : args.feature_loss_coef}
-        losses = ['feature']
-        criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
-                                eos_coef=args.eos_coef, losses=losses, device=device)
-        criterion.to(device)
-        postprocessors = {}
-        print(f"losses = {losses}")
-        print(f"weight_dict = {weight_dict}") 
-        print(f"postprocessors = {postprocessors.keys()}") 
-
-        return model, criterion, postprocessors
 
     backbone = build_convbackbone(args)
 
     transformer = build_transformer(args)
 
-    ftr_backbone = None
-    #f args.feature =='16' and args.pose is None:
-    #    ftr_backbone = build_ftr_backbone(args)
-    
     model = RFTR(
         backbone,
         transformer,
         num_classes=num_classes,
         num_queries=args.num_queries,
         num_txrx = args.num_txrx,
-        aux_loss=args.aux_loss
+        aux_loss=args.aux_loss,
+        box_feature=args.box_feature
     )
 
     
@@ -527,7 +631,7 @@ def build_rftr(args):
 
 
 
-    if args.feature is not 'x':
+    if args.feature is not 'x' or (args.pose is None and args.box_feature is not 'x'):
         weight_dict['loss_feature'] = args.feature_loss_coef
 
 
@@ -547,7 +651,7 @@ def build_rftr(args):
         losses += ['posedr']
         losses += ['posehm']
 
-    if args.feature is not 'x':
+    if args.feature is not 'x' or (args.pose is None and args.box_feature is not 'x'):
         losses += ['feature']
 
 

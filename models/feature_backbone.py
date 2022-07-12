@@ -88,29 +88,6 @@ class LinearScheduler(nn.Module):
 
         self.i += 1
 
-
-class SELayer(nn.Module):
-    def __init__(self, channel, reduction=16):
-        super(SELayer, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool1d(1) #nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-                nn.Linear(channel, int(channel/reduction), bias=False),
-                nn.ReLU(inplace=True),
-                nn.Linear(int(channel/reduction), channel, bias=False),
-                nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        #print(x.shape)
-        b, c, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        #print(y.shape)
-        y = self.fc(y).view(b, c, 1)
-        z = x * y.expand_as(x)
-        #print(y.expand_as(x).shape, z.shape)
-        return x * y.expand_as(x)
-
-
 class Block(nn.Module):
     r""" ConvNeXt Block. There are two equivalent implementations:
     (1) DwConv -> LayerNorm (channels_first) -> 1x1 Conv -> GELU -> 1x1 Conv; all in (N, C, H, W)
@@ -122,7 +99,7 @@ class Block(nn.Module):
         drop_path (float): Stochastic depth rate. Default: 0.0
         layer_scale_init_value (float): Init value for Layer Scale. Default: 1e-6.
     """
-    def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6, selayer=False):
+    def __init__(self, dim, drop_path=0., layer_scale_init_value=1e-6):
         super().__init__()
         self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim) # depthwise conv
         #self.dwconv = nn.Conv1d(dim, dim, kernel_size=5, padding=2, groups=dim) # depthwise conv
@@ -133,7 +110,7 @@ class Block(nn.Module):
         self.gamma = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True) if layer_scale_init_value > 0 else None
         #print("gamma = ", self.gamma)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.se = SELayer(dim, 16) if selayer else None
+
 
     def forward(self, x):
         input = x
@@ -148,9 +125,6 @@ class Block(nn.Module):
         if self.gamma is not None:
             x = self.gamma * x
         x = x.permute(0, 2, 1) # (N, L, C) -> (N, C, L)
-        if self.se is not None:
-            x = self.se(x)
-        #print(self.training)
         x = input + self.drop_path(x)
         
         return x
@@ -162,14 +136,15 @@ class ConvNeXt(nn.Module):
                     #dims=[96, 144, 192, 240],#384, 768], 
                     dims=[96, 192, 384, 768], 
                     drop_path_rate=0., 
+                    drop_prob = 0.2, #0.2,
+                    drop_size = 4,
+                    num_txrx = 8,
                     layer_scale_init_value=1.0, #1e-6, 
-                    selayer=False,
-                    feature_size=16
                  ):
         super().__init__()
 
         #in_chans = 16*(stack_num//frame_skip)
-        in_chans = 64*(stack_num//frame_skip)
+        in_chans = (num_txrx**2)*(stack_num//frame_skip)
         #in_chans = 64
         self.input_d = in_chans
         self.stack_num=stack_num
@@ -206,28 +181,28 @@ class ConvNeXt(nn.Module):
         for i in range(len(dims)):
             stage = nn.Sequential(
                 *[Block(dim=dims[i], drop_path=dp_rates[cur + j], 
-                layer_scale_init_value=layer_scale_init_value, selayer=selayer) for j in range(depths[i])]
+                layer_scale_init_value=layer_scale_init_value) for j in range(depths[i])]
             )
             self.stages.append(stage)
             cur += depths[i]
 
         self.apply(self._init_weights)
+
+        if drop_prob > 0.:
+            self.drop_block = LinearScheduler(
+                dropblock = DropBlock1D(block_size=drop_size, drop_prob=0.),
+                start_value=0.,
+                stop_value =drop_prob,
+                nr_steps=2e4 #5e3
+            )
+            print(self.drop_block.dropblock)
+        else:
+            self.drop_block = None
         
         
         self.num_channels = dims[-1]#//2
         self.deconv_layers = None
         
-        '''
-        self.num_deconv_filters =[128, 64] #[128, 64]
-        self.num_deconve_kernels = [4] * len(self.num_deconv_filters)
-        self.inplanes = dims[-1]
-
-        self.deconv_layers = self._make_deconv_layer(
-            len(self.num_deconv_filters),  # NUM_DECONV_LAYERS
-            self.num_deconv_filters,  # NUM_DECONV_FILTERS
-            self.num_deconve_kernels,  # NUM_DECONV_KERNERLS
-        ) 
-        '''
         self.final_layer = nn.Sequential(
             nn.BatchNorm2d(dims[-1], momentum=0.1),
             nn.Conv2d(
@@ -256,11 +231,15 @@ class ConvNeXt(nn.Module):
         for i in range(len(self.depths)):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
+            if i==2 or i==3:
+                if self.drop_block is not None:
+                    x = self.drop_block(x)
             
         return x
 
     def forward(self, input):#tensor_list: NestedTensor):
-
+        if self.drop_block is not None:
+            self.drop_block.step()
         xs = OrderedDict()
         #input = tensor_list.tensors 
         #print(input.shape) # 128 1 64 78
@@ -380,8 +359,9 @@ def build_ftr_backbone(args):
                             frame_skip=args.frame_skip, 
                             depths=[3,3,18,3], 
                             drop_path_rate=args.drop_prob, 
-                            selayer=False,
-                            feature_size=args.feature_size)
+                            drop_prob=args.dropblock_prob,
+                            drop_size=args.drop_size,
+                            num_txrx =args.num_txrx)
 
     return backbone
 

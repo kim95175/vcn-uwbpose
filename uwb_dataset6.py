@@ -39,12 +39,9 @@ class UWBDataset(Dataset):
         self.load_hm = True if (args.pose == 'hm' or args.pose =='hmdr') else False
         self.load_mask = True if args.pose is not None and mode != 'train' else False
         self.load_img = args.vis and mode != 'train'
-        self.load_feature = args.feature is not 'x'
+        self.load_feature = args.feature is not 'x' or args.box_feature is not 'x'
         self.feature = args.feature
 
-        if args.feature_train:
-            self.load_cd, self.load_mask, self.load_img, self.load_hm = False, False, False, False
-            self.load_feature = True
 
         self.is_normalize = False #True
         self.is_ftr_normalize = False #True
@@ -171,8 +168,7 @@ class UWBDataset(Dataset):
                 outlier_list += list(range(200, 500-self.stack_avg))
                 outlier_list += list(range(600, 800-self.stack_avg))
                 outlier_list += list(range(1000,3001))
-                #outlier_list = list(range(600-self.stack_avg-10))
-                #outlier_list += list(range(800,3001))
+                
             elif test_set == 67:
                 test_dir = [41]
                 outlier_list = list(range(1000))
@@ -566,7 +562,25 @@ class UWBDataset(Dataset):
                 feature = feature / np.max(feature)
             #feature = feature[:, ::2, ::2] # 32 64 64
             
-        if self.mixup_prob > 0.0 and self.mode == 'train' and not self.load_hm:
+        if self.mixup_prob > 0.0 and self.mode == 'train' and not self.load_cd:
+            '''
+            t = 1
+            lam = np.random.beta(0.5, 0.5) #np.random.rand() #+ 0.5#np.random.beta(0.5, 0.5)
+            rf = lam * rf
+            while t < 4 and random.random() < self.mixup_prob:
+                mixup_idx = random.randint(0, len(self.rf_data)-1)
+                if idx != mixup_idx:
+                    t += 1
+                    mixup_rf = self.get_rf(mixup_idx)
+                    mixup_target = self.target_list[mixup_idx]
+                    #mixup_target = np.load(mixup_target)
+                    lam = np.random.beta(self.mixup_alpha, self.mixup_alpha) #0.5
+                    rf = rf + lam * mixup_rf
+                    target = np.concatenate((target, mixup_target), axis=0)
+            
+                    #print(f"[{t}th] target.shape = ", target.shape)
+                    
+            '''
             if random.random() < self.mixup_prob:
                 mixup_idx = random.randint(0, len(self.rf_data)-1)
                 if idx != mixup_idx:
@@ -594,6 +608,8 @@ class UWBDataset(Dataset):
             elif random.random() < 0.5 and self.mode == 'train':
                 lam = np.random.beta(0.5, 0.5) #np.random.rand() #+ 0.5#np.random.beta(0.5, 0.5)
                 rf = lam * rf
+                if self.load_features:
+                    feature = lam * feature 
                 
             '''
             if random.random() < 0.5 and self.mode == 'train':

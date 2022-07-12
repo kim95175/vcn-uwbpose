@@ -32,8 +32,8 @@ def get_args_parser():
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
     # * Backbone
-    parser.add_argument('--backbone', type=str, default='rftr', choices=('rftr', 'convnext'),
-                        help="backbone")
+    parser.add_argument('--model', type=str, default='m', choices=('s', 'm', 'l'),
+                        help="model_size")
     parser.add_argument('--res4dim', default=18, type=int,
                         help="convnext res4 # of stages")  
     parser.add_argument('--position_embedding', default='sine', type=str, choices=('none', 'sine', 'learned'),
@@ -105,7 +105,6 @@ def get_args_parser():
     parser.add_argument('--num_txrx', type=int, default=8,
                 help='# of used tx & rx')
     
-    
 
     # evaluate paramater
     parser.add_argument('--vis', action='store_true', default=False,
@@ -145,10 +144,11 @@ def get_args_parser():
     # * feature train
     parser.add_argument('--feature', default='x', type=str, choices=('x','16', '32', '128'),
                         help="get img featuremap")
-    parser.add_argument('--feature_size', type=int, default=16, 
-            help='size of feature map')  
-    parser.add_argument('--feature_train', action='store_true',
-                        help="train only img featuremap model")
+    parser.add_argument('--box_feature', default='x', type=str, choices=('x','16', '32', '128'),
+                        help="get img featuremap")
+
+    parser.add_argument('--soft_nms', action='store_true', default=False,
+                help='use soft_nms when postprocessing')               
 
     return parser
 
@@ -163,7 +163,19 @@ def main(args):
     if args.pose is not None:
         args.mixup_prob = 0.
         args.three = 0.
-        args.dropblock_prob = 0.
+        #args.dropblock_prob = 0.
+    
+    
+    if args.model =='s':
+        args.hidden_dim, args.res4dim = 128, 9
+        args.dec_layers, args.dim_feedforward = 3, 1024
+    elif args.model =='m':
+        args.hidden_dim, args.res4dim = 256, 18  
+        args.dec_layers, args.dim_feedforward = 6, 2048
+    elif args.model =='l':
+        args.hidden_dim, args.res4dim = 512, 27  
+        args.dec_layers, args.dim_feedforward = 9, 2048
+    
 
     print(args)
     print(torch.backends.cudnn.benchmark)
@@ -197,10 +209,6 @@ def main(args):
         {"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]},
     ]
     
-    if args.feature_train:
-        for n, p in model_without_ddp.named_parameters():
-            print(n, p.shape)
-    
 
     if args.lr_scheduler == 'linear':
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, weight_decay=args.weight_decay)
@@ -209,6 +217,7 @@ def main(args):
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr_min, weight_decay=args.weight_decay)
         #lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=1, eta_max=args.lr,  T_up=5, gamma=0.5)
         lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=50, T_mult=1, eta_max=args.lr,  T_up=10, gamma=0.5)
+        #lr_scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=30, T_mult=1, eta_max=args.lr,  T_up=5, gamma=0.5)
     
     
     if args.frozen_weights is not None:
@@ -222,7 +231,7 @@ def main(args):
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
         model_without_ddp.load_state_dict(checkpoint['model'])
-        if not args.eval and not args.finetune and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+        if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
@@ -241,7 +250,7 @@ def main(args):
             model, criterion, postprocessors, data_loader_val, device, args.output_dir, \
                             val_vis=args.vis, is_pose=args.pose, img_dir=args.img_dir, \
                             boxThrs=args.box_threshold, epoch=-1, dr_size=args.dr_size,
-                            feature_type=args.feature
+                            feature_type=args.feature, soft_nms=args.soft_nms
         )
         return
     print("Start training")

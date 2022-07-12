@@ -100,28 +100,20 @@ class RFTRpose(nn.Module):
         self.only_feature = False #True
         self.num_txrx = self.rftr.num_txrx
 
-        if method =='simdr':
-            #mlp_dim = 64*64
-            mlp_dim = 32*32
-            hidden_dr_dim = mlp_dim // 2 
-            output_dim = dr_size
-            self.output_dim = output_dim
-            self.mlp_head_x = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
-            self.mlp_head_y = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
-        elif method == 'hmdr':
-            self.final_dr_layer = nn.Conv2d(
-                in_channels=self.num_joints, 
-                out_channels=self.num_joints,  
-                kernel_size=2,#1,
-                stride=2, #2 # 1
-                padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-            )
-            mlp_dim = 32*32
-            hidden_dr_dim = mlp_dim // 2 
-            output_dim = dr_size
-            self.output_dim = output_dim
-            self.mlp_head_x = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
-            self.mlp_head_y = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
+        
+        self.final_dr_layer = nn.Conv2d(
+            in_channels=self.num_joints, 
+            out_channels=self.num_joints,  
+            kernel_size=2,#1,
+            stride=2, #2 # 1
+            padding=0  # if FINAL_CONV_KERNEL = 3 else 1
+        )
+        mlp_dim = 32*32
+        hidden_dr_dim = mlp_dim // 2 
+        output_dim = dr_size
+        self.output_dim = output_dim
+        self.mlp_head_x = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
+        self.mlp_head_y = MLP(mlp_dim, hidden_dr_dim, output_dim, 3)
         
         
         dummy_input = torch.zeros((4, int(self.rftr.stack_num//self.rftr.frame_skip), self.num_txrx**2, 768))
@@ -130,7 +122,7 @@ class RFTRpose(nn.Module):
     #def forward(self, samples: NestedTensor, features: Tensor):
     def forward(self, samples, targets=None):
         
-        src, mask, pos = self.rftr.backbone(samples)
+        src, mask, pos, _ = self.rftr.backbone(samples)
         bs = src.shape[0]
         assert mask is not None
 
@@ -139,10 +131,11 @@ class RFTRpose(nn.Module):
         src_proj = rearrange(src_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
 
         if self.use_feature:
+            tgt_features = [t["features"] for t in targets]
+            tgt_features, _ = nested_tensor_from_tensor_list(tgt_features).decompose()
+            tgt_features = tgt_features.to(src_proj)
             if self.only_feature:
-                tgt_feature = [t["features"] for t in targets]
-                features, _ = nested_tensor_from_tensor_list(tgt_feature).decompose()
-                features = features.to(src_proj)
+                features = tgt_features
                 #print("features.shape = ", features.shape)
             else:
                 features = self.ftr_backbone(samples)['pred_feature']
@@ -160,16 +153,23 @@ class RFTRpose(nn.Module):
             out['aux_outputs'] = self.rftr._set_aux_loss(outputs_class, outputs_coord)
         
         if self.use_feature:
-            out['sig_feature'] = src_proj
+            #out['sig_feature'] = src_proj
             out['pred_feature'] = features
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-            seg_pose = self.pose_head(src_proj, bbox_mask, features)
+            seg_pose = self.pose_head(src_proj, bbox_mask, features, tgt_features)
+            '''
+            seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
+            out['pred_feature'] = gram[0]
+            out['tgt_feature'] = gram[1]
+            '''
+
         else:
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
             seg_pose = self.pose_head(src_proj, bbox_mask)
 
 
-        if self.method =='simdr':
+        #if self.method =='simdr':
+        if False:
             #print(seg_pose.shape)
             out['pred_hm'] = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, 32, 32)
             seg_pose = seg_pose.flatten(2) #if not self.no_dec else seg_pose.flatten(3)
@@ -180,10 +180,10 @@ class RFTRpose(nn.Module):
             out['x_coord'] = outputs_x
             out['y_coord'] = outputs_y
             out['output_size'] = self.output_size
-        elif self.method =='hm':
+        if self.method =='hm':
             outputs_pose_masks = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             out["pred_hm"] = outputs_pose_masks
-        elif self.method =='hmdr':
+        elif self.method =='hmdr' or self.method =='simdr':
             out["pred_hm"] = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             seg_pose = self.final_dr_layer(seg_pose)
             seg_pose = seg_pose.flatten(2) #if not self.no_dec else seg_pose.flatten(3)
@@ -195,15 +195,13 @@ class RFTRpose(nn.Module):
             out['y_coord'] = outputs_y
             out['output_size'] = self.output_size
 
-
-    
         return out
     
     
     def check_dim(self, samples: NestedTensor):
 
         print("____check dimension in RFTRPose_____")
-        src, mask, pos = self.rftr.backbone(samples)
+        src, mask, pos, _= self.rftr.backbone(samples)
         print(f"features[-1].decompose() = src : {src.shape}, mask : {mask.shape}")
         bs = src.shape[0]
         assert mask is not None
@@ -214,9 +212,9 @@ class RFTRpose(nn.Module):
         print(f"src_proj = {src_proj.shape}")
 
         if self.use_feature:
+            tgt_features = torch.zeros((4, 256, 16, 16))
             if self.only_feature:
-                tgt_feature = torch.zeros((4, 256, 16, 16))
-                features = tgt_feature.to(src_proj)
+                features = tgt_features.to(src_proj)
                 print("tgt_features.shape = ", features.shape)
             else:
                 features = self.ftr_backbone(samples)['pred_feature']
@@ -241,7 +239,12 @@ class RFTRpose(nn.Module):
         if self.use_feature:
             out['pred_feature'] = features
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-            seg_pose = self.pose_head(src_proj, bbox_mask, features)
+            seg_pose = self.pose_head(src_proj, bbox_mask, features, tgt_features)
+            
+            #seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
+            #print('gram == ', gram[0].shape, gram[1].shape)
+            #out['pred_feature'] = gram[0]
+            #out['tgt_feature'] = gram[1]
         else:
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
             seg_pose = self.pose_head(src_proj, bbox_mask)
@@ -249,7 +252,8 @@ class RFTRpose(nn.Module):
         print(f"bbox_mask = {bbox_mask.shape}")
         print(f"seg_pose = {seg_pose.shape}")
 
-        if self.method =='simdr':
+        #if self.method =='simdr':
+        if False:
             seg_pose = seg_pose.flatten(2) #if not self.no_dec else seg_pose.flatten(3)
             outputs_x = self.mlp_head_x(seg_pose)
             outputs_y = self.mlp_head_y(seg_pose)
@@ -264,7 +268,7 @@ class RFTRpose(nn.Module):
             outputs_pose_masks = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             out["pred_hm"] = outputs_pose_masks
             print("pose hm outputs= ", outputs_pose_masks.shape)
-        elif self.method =='hmdr':
+        elif self.method =='hmdr' or self.method == 'simdr':
             out["pred_hm"] = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             print("pose hm outputs= ", out["pred_hm"].shape)
             seg_pose = self.final_dr_layer(seg_pose)
@@ -287,6 +291,9 @@ class RFTRpose(nn.Module):
 def _expand(tensor, length: int):
     return tensor.unsqueeze(1).repeat(1, int(length), 1, 1, 1).flatten(0, 1)
 
+def _expand1d(tensor, length: int):
+    return tensor.unsqueeze(1).repeat(1, int(length), 1, 1).flatten(0, 1)
+
 
 class PoseHeadSmallConv(nn.Module):
     """
@@ -297,10 +304,20 @@ class PoseHeadSmallConv(nn.Module):
     def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x'):
         super().__init__()
         
-        inter_dims =[context_dim, context_dim // 2, context_dim // 4]   
+        self.use_feature = use_feature
+        self.method = method
+        self.dim = dim
+        self.heatmap_size = [64, 64]
+
+        inter_dims =[context_dim//2, context_dim // 4, context_dim // 4]   
+        if context_dim == 512:
+            inter_dims =[context_dim//2, context_dim // 4, context_dim // 8]   
 
         if use_feature == '16':
-            inter_dims =[context_dim, context_dim // 2 , (context_dim+256) // 4] 
+            #inter_dims =[context_dim //2, context_dim // 4 , context_dim // 4 ]  # 128, 64  64
+            
+            inter_dims =[context_dim , context_dim // 2 , context_dim // 2]  # hmdr3  256 128 128
+            
             self.adapter1 = torch.nn.Conv2d(256, inter_dims[1], 1)
         elif use_feature == '32':
             inter_dims =[context_dim, context_dim // 2 , (context_dim+256) // 4] 
@@ -322,94 +339,46 @@ class PoseHeadSmallConv(nn.Module):
                     nn.GELU()
                 )
                 self.adapter1.append(adapter_layer)
-            print(self.adapter1)
-            
-        
         print("PoseHead Inter_dims ", inter_dims)
         
+        
+        '''
         self.lay1 = torch.nn.Conv2d(dim, dim, 3, padding=1)
         self.gn1 = torch.nn.GroupNorm(8, dim)
-
         self.lay2 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
+        '''
+        self.lay1 = torch.nn.Conv2d(dim, inter_dims[0], 3, padding=1)
+        self.gn1 = torch.nn.GroupNorm(8, inter_dims[0])
+        self.lay2 = torch.nn.Conv2d(inter_dims[0], inter_dims[1], 3, padding=1)
         self.gn2 = torch.nn.GroupNorm(8, inter_dims[1])
 
         #self.lay3 = torch.nn.Conv2d(inter_dims[1]+128, inter_dims[2], 3, padding=1)
         if use_feature != 'x':
-            inter_dims[1] += 128 #256
+            inter_dims[1] *= 2 #256
         self.lay3 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
         self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
         
-        self.use_feature = use_feature
-        #self.out_lay = torch.nn.Conv2d(inter_dims[2], 1, 3, padding=1)
-        #self.adapter1 = torch.nn.Conv2d(256, inter_dims[1], 1)
-
-        self.method = method
-        self.dim = dim
-        self.inplanes= inter_dims[-1]
-        self.heatmap_size = [64, 64]
-
-        self.deconv_with_bias = False
-
-        self.hm_method = 'mlp' if method in ['hm'] else 'deconv'
-
-        if method in ['simdr']:
-            self.num_deconv_filters =[64, 52]#[64, 32]
-            #self.num_deconv_filters =[64, 52, 20]
-        elif method in ['hm']:
-            if use_feature == 'x':
-                self.num_deconv_filters =[128, 64]
-            else:
-                self.num_deconv_filters =[32, 32]#[128, 64]#[32, 32]
-        elif method in ['hmdr']:
-            self.num_deconv_filters =[64, 52]
-            
-  
-        if self.hm_method == 'mlp':
-            dim = 16*16 # 64*4
-            hidden_heatmap_dim = self.heatmap_size[0] * 16
-            heatmap_dim = self.heatmap_size[0]* self.heatmap_size[1]
-            self.mlp_head = nn.Sequential(
-                nn.LayerNorm(dim),
-                nn.Linear(dim, hidden_heatmap_dim),
-                nn.LayerNorm(hidden_heatmap_dim),
-                nn.Linear(hidden_heatmap_dim, heatmap_dim)
-            )
-            final_inchan = inter_dims[2]
-        else:
-            self.deconv_layers = self._make_deconv_layer(
-                len(self.num_deconv_filters),  # NUM_DECONV_LAYERS
-                self.num_deconv_filters,  # NUM_DECONV_FILTERS
-                [4] * len(self.num_deconv_filters),  # NUM_DECONV_KERNERLS
-            ) 
-            final_inchan = self.num_deconv_filters[-1]
+        dim = 16*16 # 64*4
+        hidden_heatmap_dim = self.heatmap_size[0] * 16
+        heatmap_dim = self.heatmap_size[0]* self.heatmap_size[1]
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_heatmap_dim),
+            nn.LayerNorm(hidden_heatmap_dim),
+            nn.Linear(hidden_heatmap_dim, heatmap_dim)
+        )
+        final_inchan = inter_dims[2]
+        #self.final_layer = nn.Conv1d(
+        self.final_layer = nn.Conv2d(
         
-        if method in ['simdr']:
-            self.final_layer = nn.Conv2d(
-                in_channels=final_inchan, 
-                out_channels=final_channel,  
-                kernel_size=1,#1,
-                stride=2, #2 # 1
-                padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-            )
-
-        elif  method in ['hm']:
-            self.final_layer = nn.Conv2d(
-                in_channels=final_inchan, 
-                out_channels=final_channel,  
-                kernel_size=1,#1,
-                stride=1, #2 # 1
-                padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-            )
-        elif method in ['hmdr']:
-            self.final_layer = nn.Conv2d(
-                in_channels=final_inchan, 
-                out_channels=final_channel,  
-                kernel_size=1,#1,
-                stride=1, #2 # 1
-                padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-            )
+            in_channels=final_inchan, 
+            out_channels=final_channel,  
+            kernel_size=1,#1,
+            stride=1, #2 # 1
+            padding=0  # if FINAL_CONV_KERNEL = 3 else 1
+        )
         
-
+        
         self.check_dim()
 
         for m in self.modules():
@@ -417,8 +386,10 @@ class PoseHeadSmallConv(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, a=1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor, bbox_mask: Tensor, feature: Tensor = None):
+    def forward(self, x: Tensor, bbox_mask: Tensor, feature: Tensor = None, tgt_feature: Tensor = None):
+
         x = torch.cat([_expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
+        gram = None
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
@@ -428,54 +399,35 @@ class PoseHeadSmallConv(nn.Module):
         x = F.relu(x)
         
         if self.use_feature != 'x':
-            if self.use_feature == '128':
-                for i in range(3):
-                    feature = self.adapter1[i](feature)
-            else:
-                feature = self.adapter1(feature)
+            feature = self.adapter1(feature)
+            
+            '''
+            tgt_feature = self.adapter1(tgt_feature)
+            tgt_feature = tgt_feature.flatten(2)
+            src_feature = feature.flatten(2)
+            
+            #gram_x = src_feature @ src_feature.permute(0, 2, 1)
+            #ram_y = tgt_feature @ tgt_feature.permute(0, 2, 1)
+            #gram = (gram_x, gram_y)
+            gram = (src_feature, tgt_feature)
+            '''
+
             feature = _expand(feature, bbox_mask.shape[1])
             x = torch.cat([x, feature], dim=1)
         
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
-          
-        if self.hm_method == 'mlp':
-            x = x.flatten(2)
-            x = self.mlp_head(x)
-            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
-        else:
-            x = self.deconv_layers(x)
 
+        x = x.flatten(2)
+        x = self.mlp_head(x)
+        x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
         x = self.final_layer(x)
         
-        return x
-
-    def _make_deconv_layer(self, num_layers, num_filters, num_kernels):
-        assert num_layers == len(num_filters), \
-            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
-        assert num_layers == len(num_kernels), \
-            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
-
-        layers = []
-        for i in range(num_layers):
-            kernel, padding, output_padding = 4, 1, 0
-
-            planes = num_filters[i]
-            layers.append(
-                nn.ConvTranspose2d(
-                    in_channels=self.inplanes,
-                    out_channels=planes,
-                    kernel_size=kernel,
-                    stride=2,
-                    padding=padding,
-                    output_padding=output_padding,
-                    bias=self.deconv_with_bias))
-            layers.append(nn.BatchNorm2d(planes, momentum=BN_MOMENTUM))
-            layers.append(nn.ReLU(inplace=True))
-            self.inplanes = planes
-
-        return nn.Sequential(*layers)
+        if gram is None:
+            return x
+        else:
+            return x, gram
 
     def check_dim(self):
         print("____check dim in PoseHeadSmallConv____") # src_proj =  batch, src_proj_c, h, w    bbx_mask = batch, num_queries, nheads, h, w
@@ -501,6 +453,19 @@ class PoseHeadSmallConv(nn.Module):
             print("feature = ", feature.shape)
             feature = self.adapter1(feature)
             print("feature adapater1 = ", feature.shape)
+            src_feature = feature.flatten(2)
+
+            '''
+            # gram matrix 
+            tgt_feature = torch.zeros((4, 256, 16, 16))
+            tgt_feature = self.adapter1(tgt_feature)
+            tgt_feature = tgt_feature.flatten(2)
+            print("tgt_feature adapater1 = ", feature.shape)
+            
+            #gram_x = src_feature @ src_feature.permute(0, 2, 1)
+            #gram_y = tgt_feature @ tgt_feature.permute(0, 2, 1)
+            #print("gram = ", gram_x.shape, gram_y.shape)
+            '''
             feature = _expand(feature, bbox_mask.shape[1])
             print("feature expand = ", feature.shape)
             x = torch.cat([x, feature], dim=1)
@@ -521,24 +486,23 @@ class PoseHeadSmallConv(nn.Module):
             feature = _expand(feature, bbox_mask.shape[1])
             print("feature expand = ", feature.shape)
             x = torch.cat([x, feature], dim=1)
-
-
+        
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
         print("lay3 x ", x.shape) 
-
-        if self.hm_method == 'mlp':
-            x = x.flatten(2)
-            x = self.mlp_head(x)
-            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
-            print("mlp head x ", x.shape) 
         
-        else:
-            x = self.deconv_layers(x)
-            print("deconv x ", x.shape) 
+        
+        x = x.flatten(2)
+        x = self.mlp_head(x)
+        print("mlp head x ", x.shape) 
+        x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
+        
         x = self.final_layer(x)
         print("final x ", x.shape) 
+        #x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
+        print("reshape x ", x.shape) 
+
 
 
 class MHAttentionMap(nn.Module):

@@ -250,11 +250,14 @@ def AP(targets, results, imgs=None,
         pred_score = pred['scores']
         pred_label = pred['labels']
         pred_boxes = pred['boxes']
+        pred_indices = pred['indices']
+        #print(pred_indices)
        
         for q in range(pred_boxes.shape[0]):
             label, conf = pred_label[q].item(), pred_score[q].item()
             x1, y1, x2, y2 = pred_boxes[q]
             box_info = [img_id, label, conf, (x1.item(), y1.item(), x2.item(), y2.item())]
+            index = pred_indices[q].item()
             #if pred_score[q] > boxThrs:
             if pred_score[q] > boxThrs:
                 detections.append(box_info)
@@ -267,7 +270,7 @@ def AP(targets, results, imgs=None,
                     color= COLORS[rand_num]
                     cv2.rectangle(pred_img, (x1, y1), (x2, y2), color, 1)
                     label_name = COCO_CLASSES[label]
-                    text_str = '%s: %.2f' % (label_name, conf)
+                    text_str = '%s[%d]: %.2f' % (label_name, index, conf)
                     font_face = cv2.FONT_HERSHEY_DUPLEX
                     font_scale, font_thickness = 0.6, 1
 
@@ -281,7 +284,7 @@ def AP(targets, results, imgs=None,
         
         if vis and i == 0:
             res = np.concatenate((pred_img, gt_img), axis=1)
-            #cv2.imwrite(os.path.join(img_dir, str()) +'_{}_bbox.png'.format(img_id), res)
+            cv2.imwrite(os.path.join(img_dir, str()) +'_{}_bbox.png'.format(img_id), res)
 
         #if not vis and i >=batch_size/10:
         #    break 
@@ -449,6 +452,7 @@ def pose_AP(targets, results, res_pose, imgs=None,
         pred_score = pred['scores']
         pred_label = pred['labels']
         pred_boxes = pred['boxes']
+        pred_indices = pred['indices']
 
         res_pose_ = res_pose[i]#.cpu().numpy()
         if pose_method != 'hm':
@@ -459,9 +463,11 @@ def pose_AP(targets, results, res_pose, imgs=None,
         for q in range(pred_boxes.shape[0]):
             label, conf = pred_label[q].item(), pred_score[q].item()
             x1, y1, x2, y2 = pred_boxes[q]
+            index = pred_indices[q].int().item()
+            #print(index)
             box_info = [img_id, label, conf, (x1.item(), y1.item(), x2.item(), y2.item())]
 
-            pose_info = [img_id, res_pose_[q], conf]
+            pose_info = [img_id, res_pose_[index], conf]
             #print(res_pose_[q])
             if pred_score[q] > boxThrs:
                 detections.append(pose_info)
@@ -470,14 +476,14 @@ def pose_AP(targets, results, res_pose, imgs=None,
             if vis:
                 if pred_score[q] > boxThrs:
                     num_obj += 1
-                    pose_to_draw.append(res_pose_[q])
+                    pose_to_draw.append(res_pose_[index])
                     
                     x1, y1, x2, y2 = x1.int().item(), y1.int().item(), x2.int().item(), y2.int().item()
                     rand_num = (img_id*x1)%19
                     color= COLORS[rand_num]
                     cv2.rectangle(pred_img, (x1, y1), (x2, y2), color, 1)
                     label_name = COCO_CLASSES[label]
-                    text_str = '%s %d: %.2f' % (label_name, q, conf)
+                    text_str = '%s[%d]: %.2f' % (label_name, index, conf)
                     font_face = cv2.FONT_HERSHEY_DUPLEX
                     font_scale, font_thickness = 0.6, 1
 
