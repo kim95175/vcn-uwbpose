@@ -68,6 +68,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         
         targets= rftr_target
         #print(features[0])
+
         if feature_type != 'x':
             outputs = model(samples, targets)
         else:

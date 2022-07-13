@@ -167,7 +167,7 @@ class ConvNeXt(nn.Module):
             self.vcn_downsample_layers = nn.ModuleList()
             self.vcn_stages = nn.ModuleList()
             
-            dim = 128  # 16*8
+            dim = 16*8
             hidden_featuremap_dim = 16*8
             featuremap_dim = 16*16
             self.mlp_head = nn.Sequential(
@@ -202,20 +202,19 @@ class ConvNeXt(nn.Module):
                     nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
             )
             self.downsample_layers.append(downsample_layer)
-            if self.box_feature != 'x' and i >= 1:
-                
-
-                if i == 1:
-                    vcn_downsample_layer = nn.Sequential(
-                            LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                            nn.Conv1d(dims[i], dims[i+1], kernel_size=2, stride=2),
-                    )
-                elif i == 2:
-                    vcn_downsample_layer = nn.Sequential(
-                            LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                            nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
-                    )
-                self.vcn_downsample_layers.append(vcn_downsample_layer)
+            if self.box_feature != 'x':# and i >= 1:
+                if i >= 1:
+                    if i == 1:
+                        vcn_downsample_layer = nn.Sequential(
+                                LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                                nn.Conv1d(dims[i], dims[i+1], kernel_size=2, stride=2),
+                        )
+                    elif i == 2:
+                        vcn_downsample_layer = nn.Sequential(
+                                LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                                nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
+                        )
+                    self.vcn_downsample_layers.append(vcn_downsample_layer)
 
 
 
@@ -316,18 +315,19 @@ class ConvNeXt(nn.Module):
         x = self.downsample_layers[1](x)
         x = self.stages[1](x)
 
+
         if self.box_feature != 'x':
             vc = self.vcn_downsample_layers[0](x)
             vc = self.vcn_stages[0](vc)
             if self.drop_block is not None:
                 vc = self.drop_block(vc)
+
             vc = self.vcn_downsample_layers[1](vc)
             vc = self.vcn_stages[1](vc)
             if self.drop_block is not None:
                 vc = self.drop_block(vc)
             
             vc = self.mlp_head(vc)
-
             vc = self.vcn_final_layer(vc)
 
         x = self.downsample_layers[2](x)
@@ -372,21 +372,18 @@ class ConvNeXt(nn.Module):
         x = self.downsample_layers[1](x)
         x = self.stages[1](x)
         print(f"1 stage = {x.shape} x {self.depths[1]}")
-
+ 
         if self.box_feature != 'x':
             vc = self.vcn_downsample_layers[0](x)
-            print(f"[vc]2 downsample layer = {vc.shape}")
+            print(f"[vc]1 downsample layer = {vc.shape}")
             vc = self.vcn_stages[0](vc)
-            print(f"[vc]2 stage = {vc.shape} x {self.vcn_depths[2]}")
-            if self.drop_block is not None:
-                vc = self.drop_block(vc)
-            
+            print(f"[vc]1 stage = {vc.shape} x {self.vcn_depths[1]}")
+
             vc = self.vcn_downsample_layers[1](vc)
             print(f"[vc]2 downsample layer = {vc.shape}")
             vc = self.vcn_stages[1](vc)
-            print(f"[vc]3 stage = {vc.shape} x {self.vcn_depths[3]}")
-            if self.drop_block is not None:
-                vc = self.drop_block(vc)
+            print(f"[vc]2 stage = {vc.shape} x {self.vcn_depths[2]}")
+                    
             vc = self.mlp_head(vc)
             print(f"[vc]mlp stage = {vc.shape}")
             vc = self.vcn_final_layer(vc)

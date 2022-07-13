@@ -239,7 +239,7 @@ class RFTRpose(nn.Module):
         if self.use_feature:
             out['pred_feature'] = features
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-            seg_pose = self.pose_head(src_proj, bbox_mask, features, tgt_features)
+            seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
             
             #seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
             #print('gram == ', gram[0].shape, gram[1].shape)

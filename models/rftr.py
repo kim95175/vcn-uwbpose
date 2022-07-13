@@ -66,14 +66,30 @@ class RFTR(nn.Module):
         #print(use_feature)
         if box_feature is not 'x':
             print("use visual clue query")
-            patch_size = 4
-            patch_dim = patch_size * patch_size * 256
+            vc_input_chan = 64
+            patch_size = 8
+            patch_dim = patch_size * patch_size * vc_input_chan
             
+            self.vc_input_proj = nn.Sequential(
+                nn.Conv2d(256, vc_input_chan, kernel_size=1),
+                nn.BatchNorm2d(vc_input_chan, momentum=0.1),
+                #LayerNorm(vc_input_chan, eps=1e-6, data_format="channels_first"),
+            )
             self.to_patch_embedding = nn.Sequential(
                 Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
-                nn.Linear(patch_dim, patch_dim//patch_size),
-                nn.LayerNorm(patch_dim//patch_size),
-                nn.Linear(patch_dim//patch_size, hidden_dim),
+                nn.Linear(patch_dim, patch_dim),
+                nn.LayerNorm(patch_dim),
+                nn.Linear(patch_dim, hidden_dim),
+            )
+
+            self.se_embed = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1)
+            )
+            self.se_fc = nn.Sequential(
+                nn.Linear(256, 256 // 16, bias=False),
+                nn.ReLU(inplace=True),
+                nn.Linear(256 // 16, 256, bias=False),
+                nn.Sigmoid()
             )
 
             #self.feature_embed = MLP(hidden_dim, hidden_dim//2, hidden_dim, 2)
@@ -101,7 +117,12 @@ class RFTR(nn.Module):
         pos, vc_query = None, None
         src, mask, pos, vc = self.backbone(samples)
         if vc is not None:
-            vc_query = self.to_patch_embedding(vc)
+            b, c, _, _ = vc.size()
+            vc_avg_query = self.se_embed(vc).view(b,c)
+            vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
+            vc_query = self.vc_input_proj(vc)
+            vc_query = self.to_patch_embedding(vc_query)
+            vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
         assert mask is not None
 
         src = src.flatten(2)
@@ -141,8 +162,15 @@ class RFTR(nn.Module):
             print("position embedding = ", pos.shape)
         if vc is not None:
             print("visual clue = ", vc.shape)
-            vc_query = self.to_patch_embedding(vc)
+            b, c, _, _ = vc.size()
+            vc_avg_query = self.se_embed(vc).view(b,c)
+            vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
+            print("visual clue to gap = ", vc_avg_query.shape)
+            vc_query = self.vc_input_proj(vc)
+            vc_query = self.to_patch_embedding(vc_query)
             print("visual clue to patch = ", vc_query.shape)
+            vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
+            print("final visual clue = ", vc_query.shape)
 
         assert mask is not None
         
