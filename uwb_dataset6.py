@@ -127,7 +127,7 @@ class UWBDataset(Dataset):
             print("remove_dir", remove_dir)
         if mode == 'test':
             if self.model_debug:
-                test_dir = [6]#[38] # 18, 22
+                test_dir = [6] if not self.load_cd else [42]#[38] # 18, 22
             elif not args.eval:
                 test_dir = [42]
 

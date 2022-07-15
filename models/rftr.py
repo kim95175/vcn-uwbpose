@@ -50,9 +50,10 @@ class RFTR(nn.Module):
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.query_embed = nn.Embedding(num_queries, hidden_dim)
 
+        input_proj_dim = hidden_dim if box_feature =='x' else 192
         self.input_proj = nn.Sequential(
                 LayerNorm(backbone.num_channels, eps=1e-6, data_format="channels_first"),
-                nn.Conv1d(backbone.num_channels, hidden_dim, kernel_size=1),
+                nn.Conv1d(backbone.num_channels, input_proj_dim, kernel_size=1),
         )
         
         self.backbone = backbone
@@ -64,7 +65,7 @@ class RFTR(nn.Module):
 
         self.box_feature = box_feature
         #print(use_feature)
-        if box_feature is not 'x':
+        if box_feature != 'x':
             print("use visual clue query")
             vc_input_chan = 64
             patch_size = 8
@@ -75,13 +76,14 @@ class RFTR(nn.Module):
                 nn.BatchNorm2d(vc_input_chan, momentum=0.1),
                 #LayerNorm(vc_input_chan, eps=1e-6, data_format="channels_first"),
             )
+            '''
             self.to_patch_embedding = nn.Sequential(
                 Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
                 nn.Linear(patch_dim, patch_dim),
                 nn.LayerNorm(patch_dim),
                 nn.Linear(patch_dim, hidden_dim),
             )
-
+        
             self.se_embed = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1)
             )
@@ -91,6 +93,8 @@ class RFTR(nn.Module):
                 nn.Linear(256 // 16, 256, bias=False),
                 nn.Sigmoid()
             )
+            '''
+
 
             #self.feature_embed = MLP(hidden_dim, hidden_dim//2, hidden_dim, 2)
 
@@ -118,20 +122,25 @@ class RFTR(nn.Module):
         src, mask, pos, vc = self.backbone(samples)
         if vc is not None:
             b, c, _, _ = vc.size()
-            vc_avg_query = self.se_embed(vc).view(b,c)
-            vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
+            #vc_avg_query = self.se_embed(vc).view(b,c)
+            #vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
             vc_query = self.vc_input_proj(vc)
-            vc_query = self.to_patch_embedding(vc_query)
-            vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
+            #vc_query = self.to_patch_embedding(vc_query)
+            #vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
         assert mask is not None
 
         src = src.flatten(2)
         input_proj = self.input_proj(src)
         input_proj = rearrange(input_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
+
+        if vc is not None:
+            input_proj = torch.cat((input_proj, vc_query), dim=1)
+            vc_query = None
+
         hs = self.transformer(input_proj, mask, self.query_embed.weight, pos, vc_query)[0]
         hs = hs[-1]
 
-        if self.box_feature:
+        if self.box_feature !='x':
             hs = hs[:, :self.num_queries, :]
 
         outputs_class = self.class_embed(hs)
@@ -163,14 +172,14 @@ class RFTR(nn.Module):
         if vc is not None:
             print("visual clue = ", vc.shape)
             b, c, _, _ = vc.size()
-            vc_avg_query = self.se_embed(vc).view(b,c)
-            vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
-            print("visual clue to gap = ", vc_avg_query.shape)
+            #vc_avg_query = self.se_embed(vc).view(b,c)
+            #vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
+            #print("visual clue to gap = ", vc_avg_query.shape)
             vc_query = self.vc_input_proj(vc)
-            vc_query = self.to_patch_embedding(vc_query)
+            #vc_query = self.to_patch_embedding(vc_query)
             print("visual clue to patch = ", vc_query.shape)
-            vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
-            print("final visual clue = ", vc_query.shape)
+            #vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
+            #print("final visual clue = ", vc_query.shape)
 
         assert mask is not None
         
@@ -178,6 +187,10 @@ class RFTR(nn.Module):
         input_proj = self.input_proj(src)
         input_proj = rearrange(input_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
 
+        if vc is not None:
+            print(f"input_proj[{input_proj.shape}] + vc_query[{vc_query.shape}]" )
+            input_proj = torch.cat((input_proj, vc_query), dim=1)
+            vc_query = None
         
         print(f"transofmer input self.input_proj(src) : {input_proj.shape}, mask : {mask.shape}", \
                 f"\n self.query_embed.weight {self.query_embed.weight.shape}")
@@ -186,7 +199,7 @@ class RFTR(nn.Module):
         
         hs = hs[-1]
 
-        if self.box_feature:
+        if self.box_feature != 'x':
             hs = hs[:, :self.num_queries, :]
             print(f"hs(decoder) without vc = {hs.shape}")
                     
@@ -628,7 +641,7 @@ def build_rftr(args):
         num_queries=args.num_queries,
         num_txrx = args.num_txrx,
         aux_loss=args.aux_loss,
-        box_feature=args.box_feature
+        #box_feature=args.box_feature
     )
 
     
@@ -642,7 +655,7 @@ def build_rftr(args):
             ftr_backbone = build_ftr_backbone32(args)     
 
         model = RFTRpose(model, freeze_rftr=(args.frozen_weights is not None), 
-                            method=args.pose, dr_size=args.dr_size, ftr_backbone=ftr_backbone)
+                            method=args.pose, dr_size=args.dr_size, ftr_backbone=ftr_backbone, roi=args.roi)
 
 
     matcher = build_matcher(args)

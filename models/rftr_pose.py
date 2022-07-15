@@ -9,6 +9,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import roi_align
 from torch import Tensor
 from PIL import Image
 import random
@@ -16,6 +17,7 @@ import cv2
 import numpy as np
 import os
 from einops import rearrange, repeat
+
 
 import util.box_ops as box_ops
 from util.misc import NestedTensor, interpolate, nested_tensor_from_tensor_list
@@ -68,7 +70,7 @@ class MLP(nn.Module):
 
 class RFTRpose(nn.Module):
     def __init__(self, rftr, freeze_rftr=False, method='simdr', 
-                dr_size=256, ftr_backbone=None):
+                dr_size=256, ftr_backbone=None, roi=False):
         super().__init__()
         print("_______RFTRpose Init________")
         self.rftr = rftr
@@ -92,9 +94,21 @@ class RFTRpose(nn.Module):
 
         hidden_dim, nheads = rftr.transformer.d_model, rftr.transformer.nhead
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
-            
+        
+        self.roi = roi
+        if self.roi:
+            self.ftr_size = 16
+            self.roi_output_size = 4
+            roi_hidden_dim = (self.roi_output_size*2)**2
+            print(f"roi mlp dim = {self.roi_output_size**2} -> {roi_hidden_dim} -> {self.ftr_size**2}")
+            self.roi_head = nn.Sequential(
+                nn.LayerNorm(self.roi_output_size**2),
+                nn.Linear(self.roi_output_size**2, roi_hidden_dim),
+                nn.LayerNorm(roi_hidden_dim),
+                nn.Linear(roi_hidden_dim, self.ftr_size**2)
+            )
         self.pose_head = PoseHeadSmallConv(hidden_dim + nheads, hidden_dim, self.num_joints, 
-                            method, use_feature=self.feature_type)
+                            method, use_feature=self.feature_type, roi=roi)
            
         self.hm_shape = 64
         self.only_feature = False #True
@@ -131,10 +145,10 @@ class RFTRpose(nn.Module):
         src_proj = rearrange(src_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
 
         if self.use_feature:
-            tgt_features = [t["features"] for t in targets]
-            tgt_features, _ = nested_tensor_from_tensor_list(tgt_features).decompose()
-            tgt_features = tgt_features.to(src_proj)
             if self.only_feature:
+                tgt_features = [t["features"] for t in targets]
+                tgt_features, _ = nested_tensor_from_tensor_list(tgt_features).decompose()
+                tgt_features = tgt_features.to(src_proj)
                 features = tgt_features
                 #print("features.shape = ", features.shape)
             else:
@@ -153,15 +167,33 @@ class RFTRpose(nn.Module):
             out['aux_outputs'] = self.rftr._set_aux_loss(outputs_class, outputs_coord)
         
         if self.use_feature:
-            #out['sig_feature'] = src_proj
+
             out['pred_feature'] = features
-            bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-            seg_pose = self.pose_head(src_proj, bbox_mask, features, tgt_features)
-            '''
-            seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
-            out['pred_feature'] = gram[0]
-            out['tgt_feature'] = gram[1]
-            '''
+            if self.roi:
+                boxes = box_ops.box_cxcywh_to_xyxy(outputs_coord)
+                features = _expand(features, boxes.shape[1])
+                boxes = boxes.flatten(0, 1)
+                ids = torch.cat(
+                    [
+                        torch.full((1,1), i, dtype=boxes.dtype, layout=torch.strided, device=boxes.device) 
+                        for i in range(len(list(boxes)))
+                    ],
+                    dim=0,
+                )
+                boxes = torch.mul(boxes, self.ftr_size)
+                rois = torch.cat([ids, boxes], dim=1)
+                roi_features = roi_align(features, rois, output_size=(self.roi_output_size,self.roi_output_size), \
+                                            spatial_scale=1.0, aligned=True)
+
+                roi_features = roi_features.flatten(2)
+                roi_features = self.roi_head(roi_features)
+                roi_features = rearrange(roi_features,'b c (p1 p2) -> b c p1 p2',p1=self.ftr_size,p2=self.ftr_size)
+                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
+                seg_pose = self.pose_head(src_proj, bbox_mask, features, roi_features)
+            else:
+                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
+                seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
+
 
         else:
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
@@ -238,8 +270,32 @@ class RFTRpose(nn.Module):
         
         if self.use_feature:
             out['pred_feature'] = features
-            bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-            seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
+            if self.roi:
+                boxes = box_ops.box_cxcywh_to_xyxy(outputs_coord)
+                features = _expand(features, boxes.shape[1])
+                boxes = boxes.flatten(0, 1)
+                print(boxes.shape, features.shape)
+                ids = torch.cat(
+                    [
+                        torch.full((1,1), i, dtype=boxes.dtype, layout=torch.strided, device=boxes.device) 
+                        for i in range(len(list(boxes)))
+                    ],
+                    dim=0,
+                )
+                boxes = torch.mul(boxes, self.ftr_size)
+                rois = torch.cat([ids, boxes], dim=1)
+                roi_features = roi_align(features, rois, output_size=(self.roi_output_size,self.roi_output_size), \
+                                            spatial_scale=1.0, aligned=True)
+                print("roi_featurs =", roi_features.shape)
+                roi_features = roi_features.flatten(2)
+                roi_features = self.roi_head(roi_features)
+                roi_features = rearrange(roi_features,'b c (p1 p2) -> b c p1 p2',p1=self.ftr_size,p2=self.ftr_size)
+                print("roi_featurs =", roi_features.shape)
+                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
+                seg_pose = self.pose_head(src_proj, bbox_mask, features, roi_features)
+            else:
+                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
+                seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
             
             #seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
             #print('gram == ', gram[0].shape, gram[1].shape)
@@ -301,13 +357,14 @@ class PoseHeadSmallConv(nn.Module):
     Upsampling is done using a FPN approach
     """
 
-    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x'):
+    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x', roi=False):
         super().__init__()
         
         self.use_feature = use_feature
         self.method = method
         self.dim = dim
         self.heatmap_size = [64, 64]
+        self.roi = roi
 
         inter_dims =[context_dim//2, context_dim // 4, context_dim // 4]   
         if context_dim == 512:
@@ -315,10 +372,9 @@ class PoseHeadSmallConv(nn.Module):
 
         if use_feature == '16':
             #inter_dims =[context_dim //2, context_dim // 4 , context_dim // 4 ]  # 128, 64  64
-            
             inter_dims =[context_dim , context_dim // 2 , context_dim // 2]  # hmdr3  256 128 128
-            
             self.adapter1 = torch.nn.Conv2d(256, inter_dims[1], 1)
+
         elif use_feature == '32':
             inter_dims =[context_dim, context_dim // 2 , (context_dim+256) // 4] 
             self.adapter1 = torch.nn.Conv2d(
@@ -339,6 +395,8 @@ class PoseHeadSmallConv(nn.Module):
                     nn.GELU()
                 )
                 self.adapter1.append(adapter_layer)
+
+
         print("PoseHead Inter_dims ", inter_dims)
         
         
@@ -412,7 +470,7 @@ class PoseHeadSmallConv(nn.Module):
             gram = (src_feature, tgt_feature)
             '''
 
-            feature = _expand(feature, bbox_mask.shape[1])
+            feature = _expand(feature, bbox_mask.shape[1]) if not self.roi else feature
             x = torch.cat([x, feature], dim=1)
         
         x = self.lay3(x)
@@ -449,24 +507,11 @@ class PoseHeadSmallConv(nn.Module):
         print("lay2 x ", x.shape) # 80, 128, 8, 8
 
         if self.use_feature =='16':
-            feature = torch.zeros((4, 256, 16, 16))
+            feature = torch.zeros((4, 256, 16, 16)) if not self.roi else torch.zeros((4*bbox_mask.shape[1], 256, 16, 16))
             print("feature = ", feature.shape)
             feature = self.adapter1(feature)
             print("feature adapater1 = ", feature.shape)
-            src_feature = feature.flatten(2)
-
-            '''
-            # gram matrix 
-            tgt_feature = torch.zeros((4, 256, 16, 16))
-            tgt_feature = self.adapter1(tgt_feature)
-            tgt_feature = tgt_feature.flatten(2)
-            print("tgt_feature adapater1 = ", feature.shape)
-            
-            #gram_x = src_feature @ src_feature.permute(0, 2, 1)
-            #gram_y = tgt_feature @ tgt_feature.permute(0, 2, 1)
-            #print("gram = ", gram_x.shape, gram_y.shape)
-            '''
-            feature = _expand(feature, bbox_mask.shape[1])
+            feature = _expand(feature, bbox_mask.shape[1]) if not self.roi else feature
             print("feature expand = ", feature.shape)
             x = torch.cat([x, feature], dim=1)
         elif self.use_feature == '32':

@@ -145,10 +145,12 @@ def get_args_parser():
     parser.add_argument('--feature', default='x', type=str, choices=('x','16', '32', '128'),
                         help="get img featuremap")
     parser.add_argument('--box_feature', default='x', type=str, choices=('x','16', '32', '128'),
-                        help="get img featuremap")
+                        help="get img featuremap for train person detection network")
+    parser.add_argument('--roi', action='store_true', default=False,
+                help='use roi for image feature map')   
 
     parser.add_argument('--soft_nms', action='store_true', default=False,
-                help='use soft_nms when postprocessing')               
+                help='use soft_nms when postprocessing')          
 
     return parser
 

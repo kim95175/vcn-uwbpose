@@ -2,6 +2,8 @@ from re import sub
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision
+print(torchvision.__path__)
+from torchvision.ops import roi_align
 #from torchvision import transforms
 import torch.nn as nn
 import torch.nn.functional as F
@@ -16,6 +18,7 @@ import cv2
 from einops import rearrange, reduce, repeat
 #from PIL import ImageChop
 
+from util import box_ops
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.gridspec import GridSpec
@@ -74,10 +77,11 @@ os.makedirs(vis_dir, exist_ok=True)
 print(vis_dir+f'imgtest-test-.png')
 #show_dir = [0, 38, 41, 42] #, 28, 42] #[18, 28]#[38, 42]
 show_dir = list(range(43))
+show_dir = [38]
 #show_dir = [19, 33]
-#target_dir = ['imgfeature', 'HEATMAP128','imgfeature128']
+target_dir = ['imgfeature', 'box_people'] #'HEATMAP128','imgfeature128']
 #target_dir = ['mask', 'HEATMAP_COOR']
-target_dir = ['HEATMAP_COOR']#,'HEATMAP_TD']
+#target_dir = ['HEATMAP_COOR']#,'HEATMAP_TD']
 
 dropblock_size = 8
 for data_dir in data_path_list:
@@ -118,10 +122,10 @@ for data_dir in data_path_list:
                     new_name = sub_dir + '/' + file_num + '.' + file_ext
                     if sub_dir_name == 'imgfeature':
                         feature = np.load(f_name)
-                        if feature.max() > 6:
-                            print(f_name, feature.max(), feature.min())
-                            feature = np.clip(feature, 0.0, 6)
-                            print(f_name, feature.max(), feature.min())
+                        #f feature.max() > 6:
+                        #    print(f_name, feature.max(), feature.min())
+                        #    feature = np.clip(feature, 0.0, 6)
+                        #    print(f_name, feature.max(), feature.min())
                             #np.save(f_name, feature)
                     if sub_dir_name =='mask':
                         mask = np.load(f_name)
@@ -134,8 +138,7 @@ for data_dir in data_path_list:
                         if hm.shape[0] == 0:
                             print(hm.shape)
                     if sub_dir_name =='box_people':
-                        hm = np.load(f_name)
-                        print(hm.shape)
+                        target = np.load(f_name)
 
                     if sub_dir_name =='HEATMAP_COOR':
                         mask = np.load(f_name)
@@ -164,7 +167,6 @@ for data_dir in data_path_list:
                         if dropblock_size % 2 == 0: 
                             block_mask = block_mask[:, :, :-1]
                         block_mask = 1 - block_mask.squeeze(1)
-                        print(block_mask.shape, block_mask[0]) # 1, 768
                         #print("block_mask", block_mask[:, None, :].shape)  # 1, 1, 768
                         
                         signal = torch_sig * block_mask[:, None, :]
@@ -175,7 +177,9 @@ for data_dir in data_path_list:
                         signal = signal.reshape((8, 8, -1)).cpu().numpy()
                         '''
 
-                    if cnt % 500 == 100:
+                    
+
+
                         if sub_dir_name == 'radar':
                             '''
                             print(f"cnt = {dir_cnt}-{file_num}")
@@ -270,7 +274,58 @@ for data_dir in data_path_list:
 
                     #os.rename(f_name, new_name)
         
+                    break
 
-        
-    
 
+
+bbox = torch.from_numpy(target[:, :-1])
+
+#print(bbox.shape, bbox, boxes)
+feature = torch.from_numpy(feature).type(bbox.dtype)
+boxes = box_ops.box_cxcywh_to_xyxy(bbox)
+
+feature =feature.unsqueeze(0).repeat(boxes.shape[0], 1, 1, 1)
+#feature =feature.unsqueeze(0).repeat(boxes.shape[0], 1, 1, 1)
+print(boxes.shape, feature.shape)
+print(list(boxes))
+#list_box = 
+# convert to roi
+device, dtype = boxes.device, boxes.dtype
+ids = torch.cat(
+    [
+        torch.full((1,1), i, dtype=dtype, layout=torch.strided, device=device) 
+        for i in range(len(list(boxes)))
+    ],
+    dim=0,
+)
+print(ids.shape, boxes.shape)
+ftr_size = 16
+boxes = torch.mul(boxes, ftr_size)
+
+rois = torch.cat([ids, boxes], dim=1)
+#rois = list(boxes.unsqueeze(1))
+print(rois) #, rois[0].shape)
+
+#print(feature.dtype, rois.dtype)
+#spatial_scale = ftr_size / img_size
+roi_result = roi_align(feature, rois, output_size=(4,4), spatial_scale=1.0)
+print(roi_result.shape)
+'''
+for i in range(boxes.shape[0]):
+    print( int(boxes[i][1]), int(boxes[i][3]), int(boxes[i][0]), int(boxes[i][2]))
+
+    print(feature[0][0][int(boxes[i][1]):int(boxes[i][3]+1)][int(boxes[i][0]):int(boxes[i][2])+1]  )
+    print(roi_result[i][0])
+'''
+
+image = torch.arange(0., 49).view(1, 1, 7, 7).repeat(2, 1, 1, 1)
+image[0] += 10
+print('image: ', image, image.shape)
+
+# for example, we have two bboxes with coords xyxy (first with batch_id=0, second with batch_id=1).
+boxes = torch.Tensor([[0, 1, 0, 5, 4],
+                     [1, 0.5, 3.5, 4, 7]])
+print(boxes.shape)
+
+roi_result = roi_align(image, boxes, output_size=(4,4), spatial_scale=1.0, aligned=True)
+print(roi_result)

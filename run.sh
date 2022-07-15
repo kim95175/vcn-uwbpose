@@ -13,9 +13,7 @@
 
 
 
-#python main.py --batch_size 128 --epochs 50 --pose hmdr --output_dir weights/rftr0_mlpdr/ --frozen_weights weights/rftr0/rftr0_200.pth --model_debug
-#python main.py --batch_size 64 --epochs 50 --pose hmdr --output_dir weights/rftr0_mlpdr_ftr2/ --frozen_weights weights/rftr0/rftr0_200.pth --feature 16 --device cuda:1 --model_debug
-#python main.py --batch_size 64 --epochs 50 --pose hmdr --output_dir weights/rftr0_mlpdr_ftr3/ --frozen_weights weights/rftr0/rftr0_200.pth --feature 16 --device cuda:1 --model_debug
+#python main.py --batch_size 64 --epochs 50 --pose hmdr --output_dir weights/rftr0_mlpdr_roi/ --frozen_weights weights/base200.pth --feature 16 --roi --model_debug
 
 #python main.py --batch_size 128 --epochs 50 --pose simdr --output_dir weights/rftr0_mlpsimdr/ --frozen_weights weights/rftr0/rftr0_200.pth --device cuda:1 --model_debug
 
@@ -23,11 +21,13 @@
 #python main.py --batch_size 128 --epochs 50 --pose hm --output_dir weights/rftr0_mlp/ --frozen_weights weights/rftr0/rftr0_200.pth --model_debug
 
 
-#python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2 --feature 16 --model_debug
-#python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2_mlp --box_feature 16 --lr 0.0004 --device cuda:1
+#python main.py --epochs 200 --batch_size 96 --output_dir weights/vcq2 --feature 16 --model_debug
+#python main.py --epochs 200 --batch_size 96 --output_dir weights/vcq2_mlp --box_feature 16 --lr 0.0004 --device cuda:1
 
-#python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2_mlp88 --box_feature 16 
-python main.py --epochs 200 --batch_size 128 --output_dir weights/vcq2_mlpenc --box_feature 16 --enc_layer 3
+#python main.py --epochs 200 --batch_size 96 --output_dir weights/vcq2_mlp88 --box_feature 16 
+#python main.py --epochs 200 --batch_size 96 --output_dir weights/vcq2_mlp88_nomix --box_feature 16 --mixup_prob 0. --device cuda:1 --model_debug
+
+#python main.py --epochs 200 --batch_size 96 --output_dir weights/vcq2_mlpsrc --box_feature 16 --resume weights/vcq2_mlpsrc/checkpoint0009.pth --device cuda:1 --model_debug 
 
 
 #python main.py --batch_size 64 --pose hmdr --epochs 50 --frozen_weights weights/rftr15_q15/checkpoint0199.pth --output_dir weights/rftr15_posehmdr_ssim/ --num_queries 15 --feature 16 --model_debug
