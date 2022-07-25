@@ -527,7 +527,7 @@ def pose_AP(targets, results, res_pose, imgs=None,
     for d in range(len(dects)):
         gt = [gt for gt in gts if gt[0] == dects[d][0]]
         iouMax = 0
-        kpiouMax = None
+        kpiouMax = 0 #None
 
         for j in range(len(gt)):
             np_pred = dects[d][1]
@@ -544,6 +544,7 @@ def pose_AP(targets, results, res_pose, imgs=None,
                 jmax = j
 
         avg_iou += iouMax
+        #print(kpiouMax)
         avg_kpiou += kpiouMax
 
         if iouMax >= IOUThreshold:

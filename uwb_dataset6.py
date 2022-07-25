@@ -32,16 +32,20 @@ class UWBDataset(Dataset):
         
         self.mode = mode
 
-
         self.load_cd = True if args.pose is not None else False
         if mode =='test':
             self.load_cd = True
         self.load_hm = True if (args.pose == 'hm' or args.pose =='hmdr') else False
         self.load_mask = True if args.pose is not None and mode != 'train' else False
         self.load_img = args.vis and mode != 'train'
-        self.load_feature = args.feature is not 'x' or args.box_feature is not 'x'
-        self.feature = args.feature
-
+        #self.feature = args.feature
+        self.load_feature = args.feature#args.feature is not 'x' or (args.box_feature is not 'x' and not self.load_cd)
+        print("uwb_dataset = ", self.load_feature)
+        
+        if args.feature_train:
+            self.load_cd, self.load_mask, self.load_img, self.load_hm = False, False, False, False
+            self.load_feature = args.feature
+                                                                                                             
 
         self.is_normalize = False #True
         self.is_ftr_normalize = False #True
@@ -61,7 +65,7 @@ class UWBDataset(Dataset):
         self.three = args.three
         self.num_txrx = args.num_txrx
 
-        if self.load_feature:
+        if 0 not in self.load_feature:
             self.mixup_prob = 0.
         
         self.stack_avg = args.stack_avg #True if args.stack_num == args.frame_skip else False #True
@@ -89,6 +93,8 @@ class UWBDataset(Dataset):
         three_list = []
 
         feature_list = []
+        feature32_list = []
+
         outlier_list = []
         
         remove_dir = []
@@ -106,7 +112,9 @@ class UWBDataset(Dataset):
         # 37 - cloth 39 - 스티로폼 40 - Wall
         # 41 - E, 42 - F
         #valid_dir = [8, 17] #list(range(18, 30)) #[8, 17] 
-        valid_dir = [9, 6, 38, 37, 39, 40, 41, 42]
+        #valid_dir = [9, 6, 38, 37, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+        valid_dir = [37, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
+        
         valid_dir += [0]
         if args.eval:
             valid_dir = list(range(1, 30))
@@ -132,17 +140,17 @@ class UWBDataset(Dataset):
                 test_dir = [42]
 
             test_set = args.test_dir[0]
-            if test_set == 51:
+            if test_set == 81:
                 test_dir = [9]
-            elif test_set == 52:
+            elif test_set == 82:
                 test_dir = [6] 
-            elif test_set == 53:
+            elif test_set == 83:
                 test_dir = [38]
                 outlier_list = list(range(2000, 4000))
-            elif test_set == 54:
+            elif test_set == 84:
                 test_dir = [38]
                 outlier_list = list(range(2000))
-            elif test_set == 55:
+            elif test_set == 85:
                 test_dir = [9, 6, 38]
             
             elif test_set == 61:
@@ -211,6 +219,7 @@ class UWBDataset(Dataset):
         filename_index = -1
 
         feature_index = -1
+        feature32_index = -1
 
         #frame_stack = deque(maxlen=self.frame_stack_num)
         frame_stack = deque(maxlen=self.stack_avg)
@@ -355,7 +364,9 @@ class UWBDataset(Dataset):
                     #mask_file_list = glob.glob(file + '/HEATMAP_COOR/*.npy')
                     mask_file_list = sorted(mask_file_list)
                     print('\n\tdir(mask):', file, '\t# of data :', len(mask_file_list))
-                    assert len(mask_file_list) == len(rf_file_list)
+                    
+                    #assert len(mask_file_list) == len(rf_file_list)
+                    
                     for mask in mask_file_list:
                         mask_index += 1
                         if mask_index in outlier_list or mask_index in not_stacked_list:
@@ -455,17 +466,11 @@ class UWBDataset(Dataset):
                         #target_list.append(target)
 
                 
-                if self.load_feature is True:
-                    #feature_file_list = glob.glob(file + '/featuremap/*.npy')
-                    if args.feature =='32':
-                        feature_file_list = glob.glob(file + '/imgfeature3/*.npy')
-                    elif args.feature =='128':
-                        feature_file_list = glob.glob(file + '/imgfeature128/*.npy') 
-                    else:    #if args.feature == '16':
-                        feature_file_list = glob.glob(file + '/imgfeature/*.npy')
+                if 16 in self.load_feature:
+                    feature_file_list = glob.glob(file + '/imgfeature/*.npy')
                     feature_file_list = sorted(feature_file_list)
-                    print('\n\tdir(feature):', file, '\t# of data :', len(feature_file_list))
-                
+                    print('\n\tdir(feature16):', file, '\t# of data :', len(feature_file_list))
+
                     for feature in feature_file_list:
                         feature_index += 1
                         if feature_index in outlier_list or feature_index in not_stacked_list:
@@ -484,6 +489,27 @@ class UWBDataset(Dataset):
                                 print(np_feature.max(), np_feature.min())
                         feature_list.append(feature)
 
+                if 32 in self.load_feature:
+                    feature32_file_list = glob.glob(file + '/imgfeature3/*.npy')
+                    #elif args.feature =='128':
+                    #    feature_file_list = glob.glob(file + '/imgfeature128/*.npy') 
+                    feature32_file_list = sorted(feature32_file_list)
+                    print('\n\tdir(feature32):', file, '\t# of data :', len(feature32_file_list))
+                
+                    for feature32 in feature32_file_list:
+                        feature32_index += 1
+                        if feature32_index in outlier_list or feature32_index in not_stacked_list:
+                            continue
+                        
+                        #print("mask_shape ", mask.shape)
+                        if feature32_index %10000 == 1000:
+                            np_feature32 = np.load(feature32)#cv2.resize(np.load(feature32), (64, 64), interpolation=cv2.INTER_AREA)
+                            print("feature32map_shape ", feature32, np_feature32.shape)
+                            print(np_feature32.max(), np_feature32.min())
+
+
+                        feature32_list.append(feature32)
+
             dir_count += 1
 
         
@@ -495,6 +521,7 @@ class UWBDataset(Dataset):
         self.img_list = img_list
         self.raw_list = raw_list
         self.feature_list = feature_list
+        self.feature32_list = feature32_list
         self.filename_list = filename_list
 
         self.target_list = target_list
@@ -505,10 +532,11 @@ class UWBDataset(Dataset):
         print(f"rf\t{len(rf_data)}/{outlier_by_ewma}\t raw\t{len(raw_list)}/{rf_frame}\t target\t{len(target_list)}")
         print(f"pose_cd\t{len(cd_list)}\t pose_hm\t{len(hm_list)}\t mask\t{len(mask_list)}")
         print(f"img\t{len(img_list)}\t file_name\t{len(filename_list)}")
-        print(f"feature\t{len(feature_list)}\t 3~4 list\t{len(three_list)}" )
+        print(f"feature\t{len(feature_list)}\t feature32\t{len(feature32_list)}")
+        print(f"3~4 list\t{len(three_list)}" )
 
-        print(f"rf_data[-1] = {rf_data[-1][0]} ~ {rf_data[-1][-1]}")
-        print(f"{target_list[-1]}")
+        #print(f"rf_data[-1] = {rf_data[-1][0]} ~ {rf_data[-1][-1]}")
+        #print(f"{target_list[-1]}")
         #print(rf_data)
         if self.mode =='train':
             #assert len(rf_data) == len(hm_list)
@@ -517,7 +545,8 @@ class UWBDataset(Dataset):
             assert len(rf_data) == len(target_list)
         assert len(raw_list) == rf_frame + 1
 
-        
+
+        self.three_len = len(self.three_list)        
         print("end - data read")
         print("size of dataset", len(self.rf_data))
 
@@ -526,7 +555,7 @@ class UWBDataset(Dataset):
 
     def __getitem__(self, idx):
         
-        if random.random() < self.three and self.mode == 'train' and len(self.three_list)>0:
+        if random.random() < self.three and self.mode == 'train' and self.three_len>0:
             idx = self.three_list[idx%len(self.three_list)]
 
         mask = np.ones((1))
@@ -534,20 +563,25 @@ class UWBDataset(Dataset):
         f_name = None
         cd = None
         hm = None
-        feature = np.ones((256, 16, 16))
+        feature = None #np.ones((256, 16, 16))
+        feature32= None #np.ones((128, 32, 32))
 
         rf = self.get_rf(idx)
         #target = np.load(self.target_list[idx])
-        target = self.target_list[idx]
+        target = self.target_list[idx] 
+        #target = np.zeros((1,5)) 
         
         if self.load_mask:
-            mask = self.mask_list[idx]
-    
+            mask = self.mask_list[idx] 
+            #mask = np.ones((1))
+
         if self.load_cd:
             cd = self.cd_list[idx]
+            #cd = np.zeros((1,13,3))
         
         if self.load_hm:
             hm = self.get_hm(idx)
+            #hm = np.zeros((1, 13, 64, 64))
         
         if self.load_img:
             img = self.img_list[idx]
@@ -555,32 +589,19 @@ class UWBDataset(Dataset):
             f_name = self.filename_list[idx]
 
 
-        if self.load_feature:
+        if 16 in self.load_feature:
             feature_name = self.feature_list[idx]
             feature = np.load(feature_name)
-            if self.is_ftr_normalize:
-                feature = feature / np.max(feature)
-            #feature = feature[:, ::2, ::2] # 32 64 64
-            
+            #if self.is_ftr_normalize:
+            #    feature = feature / np.max(feature)
+
+        if 32 in self.load_feature:
+            feature32_name = self.feature32_list[idx]
+            feature32 = np.load(feature32_name)
+
+        
         if self.mixup_prob > 0.0 and self.mode == 'train' and not self.load_cd:
-            '''
-            t = 1
-            lam = np.random.beta(0.5, 0.5) #np.random.rand() #+ 0.5#np.random.beta(0.5, 0.5)
-            rf = lam * rf
-            while t < 4 and random.random() < self.mixup_prob:
-                mixup_idx = random.randint(0, len(self.rf_data)-1)
-                if idx != mixup_idx:
-                    t += 1
-                    mixup_rf = self.get_rf(mixup_idx)
-                    mixup_target = self.target_list[mixup_idx]
-                    #mixup_target = np.load(mixup_target)
-                    lam = np.random.beta(self.mixup_alpha, self.mixup_alpha) #0.5
-                    rf = rf + lam * mixup_rf
-                    target = np.concatenate((target, mixup_target), axis=0)
             
-                    #print(f"[{t}th] target.shape = ", target.shape)
-                    
-            '''
             if random.random() < self.mixup_prob:
                 mixup_idx = random.randint(0, len(self.rf_data)-1)
                 if idx != mixup_idx:
@@ -601,15 +622,17 @@ class UWBDataset(Dataset):
                         mixup_hm = self.get_hm(mixup_idx)
                         hm = np.concatenate((hm, mixup_hm), axis=0) if idx != mixup_idx else hm
 
-                    if self.load_feature:
-                        mixup_feature = np.load(self.feature_list[idx]) if idx != mixup_idx else feature
-                        feature = lam * feature + (1.-lam) * mixup_feature
+                    #if 0 not in self.load_feature:
+                    #    mixup_feature = np.load(self.feature_list[idx]) if idx != mixup_idx else feature
+                    #    feature = lam * feature + (1.-lam) * mixup_feature
             
             elif random.random() < 0.5 and self.mode == 'train':
                 lam = np.random.beta(0.5, 0.5) #np.random.rand() #+ 0.5#np.random.beta(0.5, 0.5)
                 rf = lam * rf
-                if self.load_features:
-                    feature = lam * feature 
+                #if 16 in self.load_feature:
+                #    feature = lam * feature
+                #if 32 in self.load_feature:
+                #    feature = lam * feature32 
                 
             '''
             if random.random() < 0.5 and self.mode == 'train':
@@ -639,10 +662,10 @@ class UWBDataset(Dataset):
                 
         
         if self.mode=='train':
-            return rf, target, cd, hm, feature
+            return rf, target, cd, hm, (feature, feature32)
 
         else:
-            return rf, target, mask, cd, hm, idx, img, feature, f_name
+            return rf, target, mask, cd, hm, idx, img, (feature, feature32), f_name
             
        
     def get_rf(self, idx):
@@ -696,6 +719,7 @@ def detection_collate(batch):
     cds = []
     hms = []
     features = []
+    features32 = []
 
     for sample in batch:
         #rf = torch.FloatTensor(sample[0]).clone()
@@ -703,18 +727,21 @@ def detection_collate(batch):
         target = torch.FloatTensor(sample[1]).clone()
         cd = torch.FloatTensor(sample[2]).clone() if sample[2] is not None else None
         hm = torch.FloatTensor(sample[3]).clone() if sample[3] is not None else None
-        feature = torch.FloatTensor(sample[4]).clone() if sample[4] is not None else None
+        feature = torch.FloatTensor(sample[4][0]).clone() if sample[4][0] is not None else None
+        feature32 = torch.FloatTensor(sample[4][1]).clone() if sample[4][1] is not None else None
 
         rfs.append(rf)
         targets.append(target)
         cds.append(cd)
         hms.append(hm)
         features.append(feature)
+        features32.append(feature32)
 
     rfs = torch.stack(rfs)
-    features = torch.stack(features)
+    #features = torch.stack(features)
+    #features32 = torch.stack(features32)
  
-    return rfs, targets, cds, hms, features
+    return rfs, targets, cds, hms, (features, features32)
 
 def detection_collate_val(batch):
     rfs = []
@@ -725,6 +752,7 @@ def detection_collate_val(batch):
     ids = []
     imgs = []
     features = []
+    features32 = []
 
     for sample in batch:
         #rf = torch.FloatTensor(sample[0]).clone()  
@@ -735,7 +763,8 @@ def detection_collate_val(batch):
         hm = torch.FloatTensor(sample[4]).clone() if sample[4] is not None else None
         idx = (sample[5], sample[8])
         img = sample[6]
-        feature = torch.FloatTensor(sample[7]).clone() if sample[7] is not None else sample[7]
+        feature = torch.FloatTensor(sample[7][0]).clone() if sample[7][0] is not None else None#sample[7]
+        feature32 = torch.FloatTensor(sample[7][1]).clone() if sample[7][1] is not None else None#sample[7]
 
         rfs.append(rf)
         targets.append(target)
@@ -745,9 +774,10 @@ def detection_collate_val(batch):
         hms.append(hm)
         imgs.append(img)
         features.append(feature)
+        features32.append(feature32)
 
     rfs = torch.stack(rfs)
 
-    return rfs, targets, masks, cds, hms, ids, imgs, features
+    return rfs, targets, masks, cds, hms, ids, imgs, (features, features32)
 
 

@@ -21,8 +21,7 @@ from .convnext import build_convbackbone, LayerNorm
 from .matcher import build_matcher
 
 from .rftr_pose import (RFTRpose, PostProcessPoseDR, PostProcessPoseHM, NMTNORMCritierion, filter_target_simdr)
-from .feature_backbone import build_ftr_backbone, MSSSIM
-from .feature_backbone32 import build_ftr_backbone32
+from .feature_backbone import build_ftr_backbone
 
 from .transformer import build_transformer
 
@@ -74,29 +73,8 @@ class RFTR(nn.Module):
             self.vc_input_proj = nn.Sequential(
                 nn.Conv2d(256, vc_input_chan, kernel_size=1),
                 nn.BatchNorm2d(vc_input_chan, momentum=0.1),
-                #LayerNorm(vc_input_chan, eps=1e-6, data_format="channels_first"),
             )
-            '''
-            self.to_patch_embedding = nn.Sequential(
-                Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_size, p2 = patch_size),
-                nn.Linear(patch_dim, patch_dim),
-                nn.LayerNorm(patch_dim),
-                nn.Linear(patch_dim, hidden_dim),
-            )
-        
-            self.se_embed = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1)
-            )
-            self.se_fc = nn.Sequential(
-                nn.Linear(256, 256 // 16, bias=False),
-                nn.ReLU(inplace=True),
-                nn.Linear(256 // 16, 256, bias=False),
-                nn.Sigmoid()
-            )
-            '''
 
-
-            #self.feature_embed = MLP(hidden_dim, hidden_dim//2, hidden_dim, 2)
 
         dummy_input = torch.zeros((128, self.stack_num//self.frame_skip, num_txrx**2, 768))
         
@@ -122,11 +100,7 @@ class RFTR(nn.Module):
         src, mask, pos, vc = self.backbone(samples)
         if vc is not None:
             b, c, _, _ = vc.size()
-            #vc_avg_query = self.se_embed(vc).view(b,c)
-            #vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
             vc_query = self.vc_input_proj(vc)
-            #vc_query = self.to_patch_embedding(vc_query)
-            #vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
         assert mask is not None
 
         src = src.flatten(2)
@@ -172,14 +146,9 @@ class RFTR(nn.Module):
         if vc is not None:
             print("visual clue = ", vc.shape)
             b, c, _, _ = vc.size()
-            #vc_avg_query = self.se_embed(vc).view(b,c)
-            #vc_avg_query = self.se_fc(vc_avg_query).unsqueeze(1)
-            #print("visual clue to gap = ", vc_avg_query.shape)
             vc_query = self.vc_input_proj(vc)
-            #vc_query = self.to_patch_embedding(vc_query)
             print("visual clue to patch = ", vc_query.shape)
-            #vc_query = torch.cat((vc_query, vc_avg_query), dim=1)
-            #print("final visual clue = ", vc_query.shape)
+
 
         assert mask is not None
         
@@ -251,9 +220,9 @@ class SetCriterion(nn.Module):
         self.device = device
         if 'feature' in losses:
             self.feature_criterion = nn.MSELoss(reduction='mean').to(device)
-            #self.feature_criterion = MSSSIM()
+        if 'feature32' in losses:
+            self.feature_criterion = nn.MSELoss(reduction='mean').to(device)
 
-        #self.rftr_model = model
         self.pose_method=pose_method
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
@@ -364,7 +333,6 @@ class SetCriterion(nn.Module):
         src_pose = outputs['pred_hm'][src_idx]  #(idx_num, 17, 256)
  
         #tgt_pose = [t["pose"] for t in targets]
-        #tgt_pose, valid = nested_tensor_from_tensor_list(tgt_pose).decompose()
         #tgt_pose = tgt_pose.to(src_pose)
         tgt_pose = torch.cat([t["hm"][J] for t, (_, J) in zip(targets, indices)])
         tgt_pose = tgt_pose.to(src_pose)
@@ -399,32 +367,65 @@ class SetCriterion(nn.Module):
     
         src_feature = outputs['pred_feature']  #(idx_num, )
         batch_size = src_feature.size(0)
-        '''
-        tgt_feature = outputs['tgt_feature']
+
+        tgt_feature = torch.cat([t["features"] for t in targets])
+        #tgt_feature, valid = nested_tensor_from_tensor_list(tgt_feature).decompose()
         tgt_feature = tgt_feature.to(src_feature)
+        #print(src_feature.shape, tgt_feature.shape)
+        losses = {}
+        
+        features_pred = src_feature.reshape((batch_size, -1))
+        features_gt = tgt_feature.reshape((batch_size, -1))
+        
+        #gram
         '''
-        tgt_feature = [t["features"] for t in targets]
-        tgt_feature, valid = nested_tensor_from_tensor_list(tgt_feature).decompose()
+        b, c, x, y = src_feature.size()
+        features_pred = rearrange(src_feature, 'b n t1 t2 -> (b n) (t1 t2)')
+        features_pred = torch.mm(features_pred, features_pred.t())
+        #features_pred = features_pred.div(x*y)
+        features_gt = rearrange(tgt_feature, 'bn t1 t2 -> bn (t1 t2)')
+        features_gt = torch.mm(features_gt, features_gt.t())
+        #features_gt = features_gt.div(x*y)
+        '''
+
+        feature_loss = self.feature_criterion(features_pred, features_gt)
+        #feature_loss = nn.functional.l1_loss(features_pred, features_gt)
+
+        losses['loss_feature'] = feature_loss #/ (x*y)
+        if indices == None:
+            losses['class_error'] = 0.
+
+        return losses
+    
+    def loss_feature32(self, outputs, targets, indices, num_boxes):
+        """ This class computes the loss for pose estimation
+        scr_pose : model output (batch_size, num_joints*2, width, height)
+        tgt_hms : grount truth keypoints heatamp (batch_size, num_joints, w, h)
+        tgt_cds : ground truth keypoints coordinates  [(num_people, num_joints, 3), ] * batch_size 3 = (x, y, score)
+        """
+        #print("-------------loss_feature-----")
+        assert 'pred_feature32' in outputs
+    
+        src_feature = outputs['pred_feature32']  #(idx_num, )
+        batch_size = src_feature.size(0)
+
+        tgt_feature = torch.cat([t["features32"] for t in targets])
+        #tgt_feature, valid = nested_tensor_from_tensor_list(tgt_feature).decompose()
         tgt_feature = tgt_feature.to(src_feature)
         
         losses = {}
         
         features_pred = src_feature.reshape((batch_size, -1))
         features_gt = tgt_feature.reshape((batch_size, -1))
-        #print(features_pred[0].shape, features_gt[0].shape)
-        feature_loss = self.feature_criterion(features_pred, features_gt)
-        #feature_loss = nn.functional.l1_loss(features_pred, features_gt)
-        '''
-        #msssim loss
-        feature_loss = self.feature_criterion(src_feature, tgt_feature)
-        '''
 
-        losses['loss_feature'] = feature_loss
+        feature_loss = self.feature_criterion(features_pred, features_gt)
+
+        losses['loss_feature32'] = feature_loss
         if indices == None:
             losses['class_error'] = 0.
 
         return losses
-    
+
     
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -446,6 +447,7 @@ class SetCriterion(nn.Module):
             'posedr' : self.loss_pose_dr,
             'posehm' : self.loss_pose_hm,
             'feature': self.loss_feature,
+            'feature32': self.loss_feature32,
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -629,6 +631,21 @@ def build_rftr(args):
     num_classes = 91    
     device = torch.device(args.device)
 
+    if args.feature_train:
+        matcher = build_matcher(args)
+        model = build_ftr_backbone(args)
+        weight_dict = {'loss_feature' : args.feature_loss_coef}
+        losses = ['feature']
+        criterion = SetCriterion(num_classes, matcher=matcher, weight_dict=weight_dict,
+                                eos_coef=args.eos_coef, losses=losses, device=device)
+        criterion.to(device)
+        postprocessors = {}
+        print(f"losses = {losses}")
+        print(f"weight_dict = {weight_dict}") 
+        print(f"postprocessors = {postprocessors.keys()}") 
+
+        return model, criterion, postprocessors
+
 
     backbone = build_convbackbone(args)
 
@@ -641,21 +658,20 @@ def build_rftr(args):
         num_queries=args.num_queries,
         num_txrx = args.num_txrx,
         aux_loss=args.aux_loss,
-        #box_feature=args.box_feature
+        box_feature=args.box_feature
     )
 
     
     if args.pose is not None:
         ftr_backbone = None
-        if args.feature =='16':
+        if 0 not in args.feature or (args.frozen_ftr_weights is not None):
             ftr_backbone = build_ftr_backbone(args)
-        elif args.feature =='32':
-            ftr_backbone = build_ftr_backbone32(args) 
-        elif args.feature =='128':
-            ftr_backbone = build_ftr_backbone32(args)     
+
 
         model = RFTRpose(model, freeze_rftr=(args.frozen_weights is not None), 
-                            method=args.pose, dr_size=args.dr_size, ftr_backbone=ftr_backbone, roi=args.roi)
+                            method=args.pose, dr_size=args.dr_size, 
+                            ftr_backbone=ftr_backbone, feature_list=args.feature,
+                            roi=args.roi)
 
 
     matcher = build_matcher(args)
@@ -672,8 +688,10 @@ def build_rftr(args):
 
 
 
-    if args.feature is not 'x' or (args.pose is None and args.box_feature is not 'x'):
+    if 16 in args.feature:
         weight_dict['loss_feature'] = args.feature_loss_coef
+    if 32 in args.feature:
+        weight_dict['loss_feature32'] = args.feature_loss_coef
 
 
     if args.aux_loss:
@@ -692,8 +710,11 @@ def build_rftr(args):
         losses += ['posedr']
         losses += ['posehm']
 
-    if args.feature is not 'x' or (args.pose is None and args.box_feature is not 'x'):
+    #if args.feature is not 'x' or (args.pose is None and args.box_feature is not 'x'):
+    if 16 in args.feature:
         losses += ['feature']
+    if 32 in args.feature:
+        losses += ['feature32']
 
 
         

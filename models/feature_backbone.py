@@ -139,6 +139,8 @@ class ConvNeXt(nn.Module):
                     drop_prob = 0.2, #0.2,
                     drop_size = 4,
                     num_txrx = 8,
+                    feature_list = [16],
+                    freeze_ftr_backbone = False,
                     layer_scale_init_value=1.0, #1e-6, 
                  ):
         super().__init__()
@@ -150,7 +152,10 @@ class ConvNeXt(nn.Module):
         self.stack_num=stack_num
         self.frame_skip = frame_skip
         self.depths = depths
-        self.name = '16'
+        self.feature_list = feature_list
+        self.mlp = False#True
+        
+        self.freeze_ftr_backbone = freeze_ftr_backbone
 
         self.downsample_layers = nn.ModuleList() # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
@@ -159,10 +164,10 @@ class ConvNeXt(nn.Module):
         )
         self.downsample_layers.append(stem)
         for i in range(len(dims)-1):
-            if i != 0:
+            if self.mlp and i == 1:
                 downsample_layer = nn.Sequential(
                     LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
-                    nn.Conv1d(dims[i], dims[i+1], kernel_size=1, stride=1),
+                    nn.Conv1d(dims[i], dims[i+1], kernel_size=2, stride=2),
                 )
             else:
                 downsample_layer = nn.Sequential(
@@ -201,23 +206,43 @@ class ConvNeXt(nn.Module):
         
         
         self.num_channels = dims[-1]#//2
-        self.deconv_layers = None
+        self.mlp_head = None
+        final_chan = 256
+        if 32 in self.feature_list:
+            dim = 16*16
+            hidden_featuremap_dim = 16*32
+            featuremap_dim = 32*32
+            self.mlp_head = nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, hidden_featuremap_dim),
+                nn.LayerNorm(hidden_featuremap_dim),
+                nn.Linear(hidden_featuremap_dim, featuremap_dim)
+            )
+            final_chan = 128
         
+
         self.final_layer = nn.Sequential(
             nn.BatchNorm2d(dims[-1], momentum=0.1),
             nn.Conv2d(
                 in_channels=dims[-1], #64,#dims[-1], #self.num_deconv_filters[-1],  # NUM_DECONV_FILTERS[-1]
-                out_channels=256,#=32,  # NUM_JOINTS,
+                out_channels=final_chan,#=32,  # NUM_JOINTS,
                 kernel_size=1,  # FINAL_CONV_KERNEL
                 stride=1,
                 padding=0  # if FINAL_CONV_KERNEL = 3 else 1
             ),
        ) 
-       
+
+        if freeze_ftr_backbone:
+            print("@@@@@@@freeze ftr_backbone part@@@@@@@@@@")
+            for p in self.parameters():
+                p.requires_grad_(False)
+
+                
         self.check_dim()
         #n_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         #print('feature_backbone = number of params:', n_parameters)
-    
+
+        
 
 
     def _init_weights(self, m):
@@ -246,13 +271,14 @@ class ConvNeXt(nn.Module):
         x = rearrange(input, 'b t n d -> b (t n) d')
         x = self.forward_features(x)
 
+        if self.mlp_head is not None:
+            x = self.mlp_head(x)
         b, n, d = x.shape
         root_t = int(d**0.5)
         x = rearrange(x, 'b n (t1 t2) -> b n t1 t2', t1=root_t)
         
-        if self.deconv_layers is not None:
-            x = self.deconv_layers(x)
         x = self.final_layer(x)
+
 
         out = {'pred_feature' : x }
         return out
@@ -270,14 +296,14 @@ class ConvNeXt(nn.Module):
             x = self.stages[i](x)
             print(f"{i} stage = {x.shape} x {self.depths[i]}")
 
+        if self.mlp_head is not None:
+            x = self.mlp_head(x)
+            print("mlp_head x ", x.shape) 
         b, n, d = x.shape
         root_t = int(d**0.5)
         x = rearrange(x, 'b n (t1 t2) -> b n t1 t2', t1=root_t)
         #print(f"Final x = {x.shape}")
 
-        if self.deconv_layers is not None:
-            x = self.deconv_layers(x)
-            print("deconv x ", x.shape) 
         x = self.final_layer(x)
         print("final x ", x.shape) 
 
@@ -298,31 +324,7 @@ class ConvNeXt(nn.Module):
 
         return deconv_kernel, padding, output_padding
 
-    def _make_deconv_layer(self, num_layers, num_filters, num_kernels):
-        assert num_layers == len(num_filters), \
-            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
-        assert num_layers == len(num_kernels), \
-            'ERROR: num_deconv_layers is different len(num_deconv_filters)'
 
-        layers = []
-        for i in range(num_layers):
-            kernel, padding, output_padding = 4, 1, 0
-
-            planes = num_filters[i]
-            layers.append(
-                nn.ConvTranspose2d(
-                    in_channels=self.inplanes,
-                    out_channels=planes,
-                    kernel_size=kernel,
-                    stride=2,
-                    padding=padding,
-                    output_padding=output_padding,
-                    bias=False))
-            layers.append(nn.BatchNorm2d(planes, momentum=0.1))
-            layers.append(nn.ReLU(inplace=True))
-            self.inplanes = planes
-
-        return nn.Sequential(*layers)
 
 class LayerNorm(nn.Module):
     r""" LayerNorm that supports two data formats: channels_last (default) or channels_first. 
@@ -361,122 +363,9 @@ def build_ftr_backbone(args):
                             drop_path_rate=args.drop_prob, 
                             drop_prob=args.dropblock_prob,
                             drop_size=args.drop_size,
-                            num_txrx =args.num_txrx)
+                            num_txrx =args.num_txrx,
+                            feature_list = args.feature,
+                            freeze_ftr_backbone = (args.frozen_ftr_weights is not None)
+    )
 
     return backbone
-
-def gaussian(window_size, sigma):
-    gauss = torch.Tensor([exp(-(x - window_size//2)**2/float(2*sigma**2)) for x in range(window_size)])
-    return gauss/gauss.sum()
-
-
-def create_window(window_size, channel=1):
-    _1D_window = gaussian(window_size, 1.5).unsqueeze(1)
-    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
-    window = _2D_window.expand(channel, 1, window_size, window_size).contiguous()
-    return window
-
-def ssim(img1, img2, window_size=11, window=None, size_average=True, full=False, val_range=None):
-    # Value range can be different from 255. Other common ranges are 1 (sigmoid) and 2 (tanh).
-    if val_range is None:
-        if torch.max(img1) > 128:
-            max_val = 255
-        else:
-            max_val = 1
-
-        if torch.min(img1) < -0.5:
-            min_val = -1
-        else:
-            min_val = 0
-        L = max_val - min_val
-    else:
-        L = val_range
-    
-    print(L)
-    padd = 0
-    (_, channel, height, width) = img1.size()
-    if window is None:
-        real_size = min(window_size, height, width)
-        window = create_window(real_size, channel=channel).to(img1.device)
-
-    mu1 = F.conv2d(img1, window, padding=padd, groups=channel)
-    mu2 = F.conv2d(img2, window, padding=padd, groups=channel)
-
-    mu1_sq = mu1.pow(2)
-    mu2_sq = mu2.pow(2)
-    mu1_mu2 = mu1 * mu2
-
-    sigma1_sq = F.conv2d(img1 * img1, window, padding=padd, groups=channel) - mu1_sq
-    sigma2_sq = F.conv2d(img2 * img2, window, padding=padd, groups=channel) - mu2_sq
-    sigma12 = F.conv2d(img1 * img2, window, padding=padd, groups=channel) - mu1_mu2
-
-    C1 = (0.01 * L) ** 2
-    C2 = (0.03 * L) ** 2
-
-    v1 = 2.0 * sigma12 + C2
-    v2 = sigma1_sq + sigma2_sq + C2
-    cs = v1 / v2  # contrast sensitivity
-
-    ssim_map = ((2 * mu1_mu2 + C1) * v1) / ((mu1_sq + mu2_sq + C1) * v2)
-
-    if size_average:
-        cs = cs.mean()
-        ret = ssim_map.mean()
-    else:
-        cs = cs.mean(1).mean(1).mean(1)
-        ret = ssim_map.mean(1).mean(1).mean(1)
-
-    if full:
-        return ret, cs
-    return ret
-
-def msssim(img1, img2, window_size=11, size_average=True, val_range=None, normalize=None):
-    device = img1.device
-    #weights = torch.FloatTensor([0.0448, 0.2856, 0.3001, 0.2363, 0.1333]).to(device)
-    weights = torch.FloatTensor([0.2856, 0.3001, 0.2363, 0.1333]).to(device)
-    levels = weights.size()[0]
-    ssims = []
-    mcs = []
-    for _ in range(levels):
-        print(img1.shape, img2.shape)
-        sim, cs = ssim(img1, img2, window_size=window_size, size_average=size_average, full=True, val_range=val_range)
-
-        # Relu normalize (not compliant with original definition)
-        if normalize == "relu":
-            ssims.append(torch.relu(sim))
-            mcs.append(torch.relu(cs))
-        else:
-            ssims.append(sim)
-            mcs.append(cs)
-
-        img1 = F.avg_pool2d(img1, (2, 2))
-        img2 = F.avg_pool2d(img2, (2, 2))
-
-    ssims = torch.stack(ssims)
-    mcs = torch.stack(mcs)
-
-    # Simple normalize (not compliant with original definition)
-    # TODO: remove support for normalize == True (kept for backward support)
-    if normalize == "simple" or normalize == True:
-        ssims = (ssims + 1) / 2
-        mcs = (mcs + 1) / 2
-    print(mcs, ssims)
-    pow1 = mcs ** weights
-    pow2 = ssims ** weights
-    print(pow1, pow2)
-
-    # From Matlab implementation https://ece.uwaterloo.ca/~z70wang/research/iwssim/
-    output = torch.prod(pow1[:-1]) * pow2[-1]
-    return output
-
-class MSSSIM(torch.nn.Module):
-    def __init__(self, window_size=11, size_average=True, val_range=2):#channel=256):
-        super(MSSSIM, self).__init__()
-        self.window_size = window_size
-        self.size_average = size_average
-        #self.channel = channel
-        self.val_range=val_range
-
-    def forward(self, img1, img2):
-        # TODO: store window between calls if possible
-        return msssim(img1, img2, window_size=self.window_size, size_average=self.size_average, val_range=self.val_range)

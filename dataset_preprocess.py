@@ -64,8 +64,8 @@ dir_cnt = -1
 out_dir = [] 
 #out_dir = list(range(41, 43))
 target_dir =[]
-num_tx = 3
-num_rx = 3
+num_tx = 8
+num_rx = 8
 cutoff = 0
 
 stack_avg = 8
@@ -77,11 +77,12 @@ os.makedirs(vis_dir, exist_ok=True)
 print(vis_dir+f'imgtest-test-.png')
 #show_dir = [0, 38, 41, 42] #, 28, 42] #[18, 28]#[38, 42]
 show_dir = list(range(43))
-show_dir = [38]
+show_dir = [43]
 #show_dir = [19, 33]
-target_dir = ['imgfeature', 'box_people'] #'HEATMAP128','imgfeature128']
+#target_dir = ['imgfeature', 'box_people'] #'HEATMAP128','imgfeature128']
 #target_dir = ['mask', 'HEATMAP_COOR']
 #target_dir = ['HEATMAP_COOR']#,'HEATMAP_TD']
+target_dir =['radar', 'image']
 
 dropblock_size = 8
 for data_dir in data_path_list:
@@ -151,132 +152,71 @@ for data_dir in data_path_list:
                         signal = np.load(f_name)
                         signal = signal[:, :, cutoff:]
                         frame_stack.append(signal)
-                        '''
-                        #mvavg = movavg_filter.movAvgFilter(signal)
-                        #signal = signal - mvavg
-                        torch_sig = torch.tensor(signal).float()
-                        torch_sig = torch.flatten(torch_sig, 0, 1)
-                        torch_sig = torch_sig.unsqueeze(0)
-                        #print(torch_sig.shape)
-  
-                        mask = (torch.rand(torch_sig.shape[0], *torch_sig.shape[2:]) < 0.02).float()
-                        block_mask = F.max_pool1d(input=mask[:, None, :],
-                                    kernel_size=dropblock_size, 
-                                    stride=1, #dropblock_size,
-                                    padding=dropblock_size // 2)
-                        if dropblock_size % 2 == 0: 
-                            block_mask = block_mask[:, :, :-1]
-                        block_mask = 1 - block_mask.squeeze(1)
-                        #print("block_mask", block_mask[:, None, :].shape)  # 1, 1, 768
-                        
-                        signal = torch_sig * block_mask[:, None, :]
-                        signal = signal * block_mask.numel() / block_mask.sum()
-                        #
-                        signal = signal[0]
-                        print(signal[0])
-                        signal = signal.reshape((8, 8, -1)).cpu().numpy()
-                        '''
-
+      
                     
+                        fig = plt.figure(figsize=(15, 9))
+                        #title = plt.suptitle('%d.npy' % int(file_num))
+                        gs1 = GridSpec(num_tx, num_rx, left=0.03, right=0.97, wspace=0.10)
+
+                        temp = np.zeros(shape=(num_tx, num_rx))
+                        temp_signal_list = np.array(temp, dtype=object)
+                        signal_list = np.array(temp, dtype=object)
+
+                        for tx in range(num_tx):
+                            for rx in range(num_rx):
+                                temp_signal_list[tx][rx] = fig.add_subplot(gs1[tx, rx])
+                                temp_signal_list[tx][rx].axis(ymin=-3, ymax=3)
+                                temp_signal_list[tx][rx].axes.xaxis.set_visible(False)
+                                temp_signal_list[tx][rx].axes.yaxis.set_visible(False)
+
+                                signal_list[tx][rx], = temp_signal_list[tx][rx].plot(signal[tx][rx],
+                                                                                    label='tx:{}, rx:{}'.format(tx + 1, rx + 1))
+                                temp_signal_list[tx][rx].legend(loc='lower right', fontsize=5)
+                        
+                        #plt.savefig(vis_dir + f'{dir_cnt}_{file_num}-sig.png')
+
+                        mean_rf = np.zeros((8, 8, 1024-cutoff))
+                        '''
+                        for i in range(stack_avg):
+                            raw_rf = frame_stack[i]
+                            mean_rf += raw_rf
+                        mean_rf /= stack_avg
+
+                        signal -= mean_rf
+
+                        fig = plt.figure(figsize=(15, 9))
+                        #title = plt.suptitle('%d.npy' % int(file_num))
+                        gs1 = GridSpec(num_tx, num_rx, left=0.03, right=0.97, wspace=0.10)
+
+                        temp = np.zeros(shape=(num_tx, num_rx))
+                        temp_signal_list = np.array(temp, dtype=object)
+                        signal_list = np.array(temp, dtype=object)
+
+                        for tx in range(num_tx):
+                            for rx in range(num_rx):
+                                temp_signal_list[tx][rx] = fig.add_subplot(gs1[tx, rx])
+                                temp_signal_list[tx][rx].axis(ymin=-3, ymax=3)
+                                temp_signal_list[tx][rx].axes.xaxis.set_visible(False)
+                                temp_signal_list[tx][rx].axes.yaxis.set_visible(False)
+
+                                signal_list[tx][rx], = temp_signal_list[tx][rx].plot(signal[tx][rx],
+                                                                                    label='tx:{}, rx:{}'.format(tx + 1, rx + 1))
+                                temp_signal_list[tx][rx].legend(loc='lower right', fontsize=5)
+                        
+                        plt.savefig(vis_dir + f'{dir_cnt}_{file_num}-sig_avg.png')
+                        '''
+                        print(f_name, new_name)
+
+                    if sub_dir_name == 'image':
+                        image = cv2.imread(f_name)
+                        #cv2.imwrite(vis_dir+f'{dir_cnt}_{file_num}-img.png', image)
+
+                        print(f_name, new_name)
+
+                    os.rename(f_name, new_name)
 
 
-                        if sub_dir_name == 'radar':
-                            '''
-                            print(f"cnt = {dir_cnt}-{file_num}")
-                            print(mvavg.shape, np.min(signal), np.max(signal))
-
-                            torch_sig = torch.tensor(signal).float()
-                            torch_sig = torch.flatten(torch_sig, 0, 1)
-                            rand_idx = torch.rand((64,))
-                            #print(rand_idx)
-                            rand_idx[rand_idx>0.7] = 1
-                            rand_idx[rand_idx<0.7] = 0
-                            rand_idx = rand_idx.to(dtype=torch.bool)
-                            #print(rand_idx)
-                            torch_sig[rand_idx] = torch.zeros((1024,))
-                            '''
-
-
-                            fig = plt.figure(figsize=(15, 9))
-                            #title = plt.suptitle('%d.npy' % int(file_num))
-                            gs1 = GridSpec(num_tx, num_rx, left=0.03, right=0.97, wspace=0.10)
-
-                            temp = np.zeros(shape=(num_tx, num_rx))
-                            temp_signal_list = np.array(temp, dtype=object)
-                            signal_list = np.array(temp, dtype=object)
-
-                            for tx in range(num_tx):
-                                for rx in range(num_rx):
-                                    temp_signal_list[tx][rx] = fig.add_subplot(gs1[tx, rx])
-                                    temp_signal_list[tx][rx].axis(ymin=-3, ymax=3)
-                                    temp_signal_list[tx][rx].axes.xaxis.set_visible(False)
-                                    temp_signal_list[tx][rx].axes.yaxis.set_visible(False)
-
-                                    signal_list[tx][rx], = temp_signal_list[tx][rx].plot(signal[tx][rx],
-                                                                                        label='tx:{}, rx:{}'.format(tx + 1, rx + 1))
-                                    temp_signal_list[tx][rx].legend(loc='lower right', fontsize=5)
-                            
-                            plt.savefig(vis_dir + f'{dir_cnt}_{file_num}-sig.png')
-
-                            mean_rf = np.zeros((8, 8, 1024-cutoff))
-                            for i in range(stack_avg):
-                                raw_rf = frame_stack[i]
-                                mean_rf += raw_rf
-                            mean_rf /= stack_avg
-
-                            signal -= mean_rf
-
-                            fig = plt.figure(figsize=(15, 9))
-                            #title = plt.suptitle('%d.npy' % int(file_num))
-                            gs1 = GridSpec(num_tx, num_rx, left=0.03, right=0.97, wspace=0.10)
-
-                            temp = np.zeros(shape=(num_tx, num_rx))
-                            temp_signal_list = np.array(temp, dtype=object)
-                            signal_list = np.array(temp, dtype=object)
-
-                            for tx in range(num_tx):
-                                for rx in range(num_rx):
-                                    temp_signal_list[tx][rx] = fig.add_subplot(gs1[tx, rx])
-                                    temp_signal_list[tx][rx].axis(ymin=-3, ymax=3)
-                                    temp_signal_list[tx][rx].axes.xaxis.set_visible(False)
-                                    temp_signal_list[tx][rx].axes.yaxis.set_visible(False)
-
-                                    signal_list[tx][rx], = temp_signal_list[tx][rx].plot(signal[tx][rx],
-                                                                                        label='tx:{}, rx:{}'.format(tx + 1, rx + 1))
-                                    temp_signal_list[tx][rx].legend(loc='lower right', fontsize=5)
-                            
-                            plt.savefig(vis_dir + f'{dir_cnt}_{file_num}-sig_avg.png')
-                            
-                            #torch_sig = torch.tensor(signal).float()
-                            #torch_sig = torch.flatten(torch_sig, 0, 1)
-                            #for tx in range(8):
-                            #    print(torch.max(torch_sig[tx]), torch.min(torch_sig[tx]))
-
-                            #lam = np.random.rand()+ 0.5
-                            #torch_sig = torch_sig * lam
-                            '''
-                            rand_idx = torch.rand((64,))
-                            print(rand_idx)
-                            rand_idx[rand_idx>0.7] = 1
-                            rand_idx[rand_idx<0.7] = 0
-                            rand_idx = rand_idx.to(dtype=torch.bool)
-                            print(rand_idx)
-                            torch_sig[rand_idx] = torch.zeros((1024,))
-                            '''
-                            #for tx in range(8):
-                            #    print(torch.max(torch_sig[tx]), torch.min(torch_sig[tx]))
-
-                        if sub_dir_name == 'image':
-                            image = cv2.imread(f_name)
-                            cv2.imwrite(vis_dir+f'{dir_cnt}_{file_num}-img.png', image)
-
-                        #print(f_name, new_name)
-
-                    #os.rename(f_name, new_name)
-        
-                    break
-
-
+'''
 
 bbox = torch.from_numpy(target[:, :-1])
 
@@ -310,13 +250,13 @@ print(rois) #, rois[0].shape)
 #spatial_scale = ftr_size / img_size
 roi_result = roi_align(feature, rois, output_size=(4,4), spatial_scale=1.0)
 print(roi_result.shape)
-'''
+
 for i in range(boxes.shape[0]):
     print( int(boxes[i][1]), int(boxes[i][3]), int(boxes[i][0]), int(boxes[i][2]))
 
     print(feature[0][0][int(boxes[i][1]):int(boxes[i][3]+1)][int(boxes[i][0]):int(boxes[i][2])+1]  )
     print(roi_result[i][0])
-'''
+
 
 image = torch.arange(0., 49).view(1, 1, 7, 7).repeat(2, 1, 1, 1)
 image[0] += 10
@@ -329,3 +269,5 @@ print(boxes.shape)
 
 roi_result = roi_align(image, boxes, output_size=(4,4), spatial_scale=1.0, aligned=True)
 print(roi_result)
+
+'''

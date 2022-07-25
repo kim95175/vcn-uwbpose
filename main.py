@@ -31,6 +31,9 @@ def get_args_parser():
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
+    parser.add_argument('--frozen_ftr_weights', type=str, default=None,
+                        help="Path to the pretrained ftr model. If set, only the mask head will be trained")
+                                            
     # * Backbone
     parser.add_argument('--model', type=str, default='m', choices=('s', 'm', 'l'),
                         help="model_size")
@@ -142,8 +145,14 @@ def get_args_parser():
 
 
     # * feature train
-    parser.add_argument('--feature', default='x', type=str, choices=('x','16', '32', '128'),
-                        help="get img featuremap")
+    #parser.add_argument('--feature', default='x', type=str, choices=('x','16', '32', '128'),
+    #                    help="get img featuremap")
+    parser.add_argument('--feature', default='0',
+                        type=lambda s: [int(item) for item in s.split(',')])
+    parser.add_argument('--feature_train', action='store_true',
+                        help="train only img featuremap model")
+    
+
     parser.add_argument('--box_feature', default='x', type=str, choices=('x','16', '32', '128'),
                         help="get img featuremap for train person detection network")
     parser.add_argument('--roi', action='store_true', default=False,
@@ -167,6 +176,8 @@ def main(args):
         args.three = 0.
         #args.dropblock_prob = 0.
     
+    if args.feature_train:
+        args.mixup_prob = 0.
     
     if args.model =='s':
         args.hidden_dim, args.res4dim = 128, 9
@@ -181,7 +192,6 @@ def main(args):
 
     print(args)
     print(torch.backends.cudnn.benchmark)
-    
     
     output_dir = Path(args.output_dir)
     if args.output_dir and not args.eval and utils.is_main_process():
@@ -210,6 +220,10 @@ def main(args):
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if p.requires_grad]},
     ]
+       
+    if args.feature_train:
+        for n, p in model_without_ddp.named_parameters():
+            print(n, p.shape)
     
 
     if args.lr_scheduler == 'linear':
@@ -223,8 +237,14 @@ def main(args):
     
     
     if args.frozen_weights is not None:
+        print("Load box model = ", args.frozen_weights)
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
         model_without_ddp.rftr.load_state_dict(checkpoint['model'])
+    
+    if args.frozen_ftr_weights is not None:
+        print("Load ftr_backbone model = ", args.frozen_ftr_weights)
+        checkpoint = torch.load(args.frozen_ftr_weights, map_location='cpu')
+        model_without_ddp.ftr_backbone.load_state_dict(checkpoint['model'])
 
     if args.resume:
         if args.resume.startswith('https'):
@@ -232,11 +252,13 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
+            #print(checkpoint['epoch'])
         model_without_ddp.load_state_dict(checkpoint['model'])
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
+    
     
     #exit(-1) # Model Debug
     # UWB Dataset
@@ -252,7 +274,7 @@ def main(args):
             model, criterion, postprocessors, data_loader_val, device, args.output_dir, \
                             val_vis=args.vis, is_pose=args.pose, img_dir=args.img_dir, \
                             boxThrs=args.box_threshold, epoch=-1, dr_size=args.dr_size,
-                            feature_type=args.feature, soft_nms=args.soft_nms
+                            feature_list=args.feature, soft_nms=args.soft_nms
         )
         return
     print("Start training")
@@ -264,7 +286,7 @@ def main(args):
         # train one epoch - engine.py
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
-            args.clip_max_norm, is_pose=args.pose, feature_type=args.feature)
+            args.clip_max_norm, is_pose=args.pose, feature_list=args.feature)
             
         lr_scheduler.step()
         if args.output_dir:
@@ -272,7 +294,10 @@ def main(args):
             # extra checkpoint before LR drop and every 10 epochs
             #if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 5 == 0:
             if (epoch + 1) % save_freq == 0:
-                checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                if args.feature_train:
+                    checkpoint_paths.append(output_dir / f'checkpoint_ftr{epoch:04}.pth')
+                else:
+                    checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
@@ -286,7 +311,7 @@ def main(args):
             model, criterion, postprocessors, data_loader_val, device, args.output_dir, \
                                 val_vis=args.vis, is_pose=args.pose, epoch=epoch, \
                                     boxThrs=args.box_threshold,  dr_size=args.dr_size, \
-                                    feature_type=args.feature
+                                    feature_list=args.feature
         )
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},

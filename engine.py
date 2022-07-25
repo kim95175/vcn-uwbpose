@@ -26,7 +26,7 @@ from visualize import save_batch_heatmaps, visualize_result, vis_featuremap, sav
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0, 
-                    is_pose: str = 'simdr', feature_type: str ='x'):
+                    is_pose: str = 'simdr', feature_list: list =[0]):
     model.train()
     criterion.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -48,7 +48,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             t = targets[i]
             cd = cds[i]
             hm = hms[i]
-            feature = features[i]
+            feature = features[0][i]
+            feature32 = features[1][i]
+            #print(feature.shape)
             target_class=t[:,-1]
             
             if -1 in target_class:
@@ -58,7 +60,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                 class_exception = target_class != -1
                 t = t[class_exception]
                 
-            rftr_t = {'labels':t[:, -1].long().to(device), 'boxes':t[:, :-1].to(device), 'cd':cd, 'hm':hm, 'features':feature}
+            rftr_t = {'labels':t[:, -1].long().to(device), 'boxes':t[:, :-1].to(device), \
+                        'cd':cd, 'hm':hm, 'features':feature, 'features32':feature32}
             rftr_target.append(rftr_t)
 
         if len(neg_list) > 0:
@@ -69,10 +72,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         targets= rftr_target
         #print(features[0])
 
-        if feature_type != 'x':
-            outputs = model(samples, targets)
-        else:
-            outputs = model(samples)
+        #if 0 not in feature_list:
+        #    outputs = model(samples, targets)
+        #else:
+        outputs = model(samples)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
         
@@ -115,7 +118,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 def evaluate(model, criterion, postprocessors, 
                 data_loader, device, output_dir, val_vis=False, 
                 is_pose='simdr', img_dir = None, boxThrs=0.5, 
-                epoch=-1, dr_size = 512, feature_type: str ='x', soft_nms=False):
+                epoch=-1, dr_size = 512, feature_list: list =[0], soft_nms=False):
     output_folder = img_dir
     model.eval()
     criterion.eval()
@@ -160,7 +163,8 @@ def evaluate(model, criterion, postprocessors,
             mask = masks[i]
             cd = cds[i]
             hm = hms[i]
-            feature = features[i]
+            feature = features[0][i]
+            feature32 = features[1][i]
             target_class=t[:,-1]
             
             if -1 in target_class:
@@ -171,7 +175,7 @@ def evaluate(model, criterion, postprocessors,
                 targets[i] = targets[i][class_exception]
                 
             rftr_t = {'labels':targets[i][:, -1].long().to(device), 'boxes':targets[i][:, :-1].to(device), \
-                        'mask_size':mask, 'cd':cd, 'hm':hm, 'features':feature, 'orig_size':origin_size.to(device), \
+                        'mask_size':mask, 'cd':cd, 'hm':hm, 'features':feature, 'features32':feature32, 'orig_size':origin_size.to(device), \
                             'image_id':ids[i][0], 'f_name':ids[i][1]} 
             rftr_target.append(rftr_t)
 
@@ -183,10 +187,10 @@ def evaluate(model, criterion, postprocessors,
 
         targets= rftr_target
         
-        if feature_type != 'x':
-            outputs = model(samples, targets)
-        else: 
-            outputs = model(samples)
+        #if 0 not in feature_list: #feature_type != 'x':
+        #    outputs = model(samples, targets)
+        #else: 
+        outputs = model(samples)
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
 
@@ -209,7 +213,7 @@ def evaluate(model, criterion, postprocessors,
                 
             if val_vis and 'pred_hm' in outputs:
                 batch_hm = outputs['pred_hm']
-                save_batch_heatmaps(imgs, batch_hm, targets, img_dir, results)
+                #save_batch_heatmaps(imgs, batch_hm, targets, img_dir, results)
             
 
         elif 'posehm' in postprocessors.keys():

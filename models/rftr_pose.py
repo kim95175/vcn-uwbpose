@@ -53,24 +53,29 @@ COLORS = ((244,  67,  54),
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
 
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3):
         super().__init__()
-        self.num_layers = num_layers
+        self.num_layers = 3
 
         h = [hidden_dim, hidden_dim//2]        
         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+        #self.layers = nn.Sequential(
+        #                nn.Linear(input_dim, h[0]),
+        #                nn.GELU(),
+        #                nn.Linear(h[0], h[1]),
+        #                nn.GELU(),
+        #                nn.Linear(h[1], output_dim),
+        #            )
 
     def forward(self, x):
-        #print(f"mlp = input = {x.shape}")
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
-            #print(f"MLP layer {i} = {x.shape}")
-   
+
         return x
 
 class RFTRpose(nn.Module):
     def __init__(self, rftr, freeze_rftr=False, method='simdr', 
-                dr_size=256, ftr_backbone=None, roi=False):
+                dr_size=256, ftr_backbone=None, feature_list=[0], roi=False):
         super().__init__()
         print("_______RFTRpose Init________")
         self.rftr = rftr
@@ -88,9 +93,16 @@ class RFTRpose(nn.Module):
         self.ftr_backbone = ftr_backbone
         self.num_queries = self.rftr.num_queries
 
-        self.use_feature = True if ftr_backbone is not None else False
-        self.feature_type = self.ftr_backbone.name if ftr_backbone is not None else 'x'
-        print("feature_type = ", self.feature_type)
+        self.use_feature = True if ftr_backbone != None else False
+        
+        self.box_feature = rftr.box_feature
+        self.feature_list = feature_list
+        if self.use_feature:
+            self.freeze_ftr_backbone = self.ftr_backbone.freeze_ftr_backbone
+            if self.freeze_ftr_backbone:
+                self.feature_list = [16]
+
+        print("feature_list = ", self.feature_list)
 
         hidden_dim, nheads = rftr.transformer.d_model, rftr.transformer.nhead
         self.bbox_attention = MHAttentionMap(hidden_dim, hidden_dim, nheads, dropout=0.0)
@@ -98,8 +110,8 @@ class RFTRpose(nn.Module):
         self.roi = roi
         if self.roi:
             self.ftr_size = 16
-            self.roi_output_size = 4
-            roi_hidden_dim = (self.roi_output_size*2)**2
+            self.roi_output_size = 4 #8
+            roi_hidden_dim = self.ftr_size**2 #(self.roi_output_size*2)**2
             print(f"roi mlp dim = {self.roi_output_size**2} -> {roi_hidden_dim} -> {self.ftr_size**2}")
             self.roi_head = nn.Sequential(
                 nn.LayerNorm(self.roi_output_size**2),
@@ -107,11 +119,12 @@ class RFTRpose(nn.Module):
                 nn.LayerNorm(roi_hidden_dim),
                 nn.Linear(roi_hidden_dim, self.ftr_size**2)
             )
+        
         self.pose_head = PoseHeadSmallConv(hidden_dim + nheads, hidden_dim, self.num_joints, 
-                            method, use_feature=self.feature_type, roi=roi)
+                            method, use_feature=self.feature_list)
            
         self.hm_shape = 64
-        self.only_feature = False #True
+        self.only_feature = False
         self.num_txrx = self.rftr.num_txrx
 
         
@@ -136,24 +149,33 @@ class RFTRpose(nn.Module):
     #def forward(self, samples: NestedTensor, features: Tensor):
     def forward(self, samples, targets=None):
         
-        src, mask, pos, _ = self.rftr.backbone(samples)
+        src, mask, pos, vc = self.rftr.backbone(samples)
         bs = src.shape[0]
         assert mask is not None
 
         src_flat = src.flatten(2)
         src_proj = self.rftr.input_proj(src_flat)
         src_proj = rearrange(src_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
+        features = [None, None, None]
 
         if self.use_feature:
             if self.only_feature:
-                tgt_features = [t["features"] for t in targets]
-                tgt_features, _ = nested_tensor_from_tensor_list(tgt_features).decompose()
-                tgt_features = tgt_features.to(src_proj)
-                features = tgt_features
-                #print("features.shape = ", features.shape)
+                if 16 in self.feature_list:
+                    tgt_features = torch.stack([t["features"] for t in targets])
+                    #tgt_features, _ = nested_tensor_from_tensor_list(tgt_features).decompose()
+                    tgt_features = tgt_features.to(src_proj)
+                    features[0] = tgt_features
+                
+                if 32 in self.feature_list:
+                    tgt_features32 = torch.stack([t["features32"] for t in targets])
+                    #tgt_features32, _ = nested_tensor_from_tensor_list(tgt_features32).decompose()
+                    tgt_features32 = tgt_features32.to(src_proj)
+                    features[1] = tgt_features32
+
             else:
-                features = self.ftr_backbone(samples)['pred_feature']
-        
+                proj_features = self.ftr_backbone(samples)['pred_feature']
+                if 16 in self.feature_list:
+                    features[0] = proj_features
      
         hs, memory = self.rftr.transformer(src_proj, mask, self.rftr.query_embed.weight, pos)
 
@@ -166,52 +188,22 @@ class RFTRpose(nn.Module):
         if self.rftr.aux_loss:
             out['aux_outputs'] = self.rftr._set_aux_loss(outputs_class, outputs_coord)
         
-        if self.use_feature:
 
-            out['pred_feature'] = features
-            if self.roi:
-                boxes = box_ops.box_cxcywh_to_xyxy(outputs_coord)
-                features = _expand(features, boxes.shape[1])
-                boxes = boxes.flatten(0, 1)
-                ids = torch.cat(
-                    [
-                        torch.full((1,1), i, dtype=boxes.dtype, layout=torch.strided, device=boxes.device) 
-                        for i in range(len(list(boxes)))
-                    ],
-                    dim=0,
-                )
-                boxes = torch.mul(boxes, self.ftr_size)
-                rois = torch.cat([ids, boxes], dim=1)
-                roi_features = roi_align(features, rois, output_size=(self.roi_output_size,self.roi_output_size), \
-                                            spatial_scale=1.0, aligned=True)
+        if 0 not in self.feature_list:   #if self.use_feature:
+            if 16 in self.feature_list:
+                out['pred_feature'] = features[0]
+            if 32 in self.feature_list:
+                out['pred_feature32'] = features[1]
 
-                roi_features = roi_features.flatten(2)
-                roi_features = self.roi_head(roi_features)
-                roi_features = rearrange(roi_features,'b c (p1 p2) -> b c p1 p2',p1=self.ftr_size,p2=self.ftr_size)
-                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-                seg_pose = self.pose_head(src_proj, bbox_mask, features, roi_features)
-            else:
-                bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-                seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
-
+            bbox_mask = self.bbox_attention(hs, memory, mask=mask)
+            #print(features[1].shape)
+            seg_pose = self.pose_head(src_proj, bbox_mask, features)
 
         else:
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
             seg_pose = self.pose_head(src_proj, bbox_mask)
 
 
-        #if self.method =='simdr':
-        if False:
-            #print(seg_pose.shape)
-            out['pred_hm'] = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, 32, 32)
-            seg_pose = seg_pose.flatten(2) #if not self.no_dec else seg_pose.flatten(3)
-            outputs_x = self.mlp_head_x(seg_pose)
-            outputs_y = self.mlp_head_y(seg_pose)
-            outputs_x = outputs_x.view(bs, self.rftr.num_queries, self.num_joints, self.output_size)
-            outputs_y = outputs_y.view(bs, self.rftr.num_queries, self.num_joints, self.output_size)
-            out['x_coord'] = outputs_x
-            out['y_coord'] = outputs_y
-            out['output_size'] = self.output_size
         if self.method =='hm':
             outputs_pose_masks = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             out["pred_hm"] = outputs_pose_masks
@@ -233,24 +225,39 @@ class RFTRpose(nn.Module):
     def check_dim(self, samples: NestedTensor):
 
         print("____check dimension in RFTRPose_____")
-        src, mask, pos, _= self.rftr.backbone(samples)
+        src, mask, pos, vc = self.rftr.backbone(samples)
         print(f"features[-1].decompose() = src : {src.shape}, mask : {mask.shape}")
         bs = src.shape[0]
         assert mask is not None
+        features = [None, None, None] 
 
         src_flat = src.flatten(2)
         src_proj = self.rftr.input_proj(src_flat)
         src_proj = rearrange(src_proj, 'b n (t1 t2) -> b n t1 t2', t1=16)
         print(f"src_proj = {src_proj.shape}")
+        if vc is not None:
+            vc_query = self.rftr.vc_input_proj(vc)
+            print(f"input_proj[{src_proj.shape}] + vc_query[{vc_query.shape}]" )
+            src_proj = torch.cat((src_proj, vc_query), dim=1)
+            print(f"self.input_proj(src) : {src_proj.shape}")
 
         if self.use_feature:
-            tgt_features = torch.zeros((4, 256, 16, 16))
             if self.only_feature:
-                features = tgt_features.to(src_proj)
-                print("tgt_features.shape = ", features.shape)
+                if 16 in self.feature_list:
+                    tgt_features = torch.zeros((4, 256, 16, 16))
+                    features[0] = tgt_features.to(src_proj)
+                    print("tgt_features.shape = ", features[0].shape)
+                if 32 in self.feature_list:
+                    tgt_features32 = torch.zeros((4, 128, 32, 32))
+                    features[1] = tgt_features32.to(src_proj)
+                    print("tgt_features.shape = ", features[1].shape)
+            
             else:
-                features = self.ftr_backbone(samples)['pred_feature']
-                print("features.shape = ", features.shape)
+                proj_features = self.ftr_backbone(samples)['pred_feature']
+                if 16 in self.feature_list:
+                    features[0] = proj_features
+                    print("features.shape = ", features[0].shape)
+
         
         hs, memory = self.rftr.transformer(src_proj, mask, self.rftr.query_embed.weight, pos) 
         print(f"hs(decoder) = {hs.shape}, memory(encoder) = {memory.shape}")
@@ -267,10 +274,20 @@ class RFTRpose(nn.Module):
         if self.rftr.aux_loss:
             out['aux_outputs'] = self.rftr._set_aux_loss(outputs_class, outputs_coord)
         
+        if vc is not None:
+            print("visual clue trained in box prediction = ", vc.shape)
+            features = vc
         
-        if self.use_feature:
-            out['pred_feature'] = features
-            if self.roi:
+        if features != None: #self.use_feature:
+            
+            if 16 in self.feature_list:
+                out['pred_feature'] = features[0]
+                print("[16]features input to the pose_head = ", features[0].shape)
+            if 32 in self.feature_list:
+                out['pred_feature32'] = features[1]
+                print("[32]features input to the pose_head = ", features[1].shape)
+                
+            if False: #self.roi:
                 boxes = box_ops.box_cxcywh_to_xyxy(outputs_coord)
                 features = _expand(features, boxes.shape[1])
                 boxes = boxes.flatten(0, 1)
@@ -292,15 +309,10 @@ class RFTRpose(nn.Module):
                 roi_features = rearrange(roi_features,'b c (p1 p2) -> b c p1 p2',p1=self.ftr_size,p2=self.ftr_size)
                 print("roi_featurs =", roi_features.shape)
                 bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-                seg_pose = self.pose_head(src_proj, bbox_mask, features, roi_features)
+                seg_pose = self.pose_head(src_proj, bbox_mask, roi_features)
             else:
                 bbox_mask = self.bbox_attention(hs, memory, mask=mask)
-                seg_pose = self.pose_head(src_proj, bbox_mask, features, features)
-            
-            #seg_pose, gram = self.pose_head(src_proj, bbox_mask, features, tgt_features)
-            #print('gram == ', gram[0].shape, gram[1].shape)
-            #out['pred_feature'] = gram[0]
-            #out['tgt_feature'] = gram[1]
+                seg_pose = self.pose_head(src_proj, bbox_mask, features)
         else:
             bbox_mask = self.bbox_attention(hs, memory, mask=mask)
             seg_pose = self.pose_head(src_proj, bbox_mask)
@@ -308,19 +320,7 @@ class RFTRpose(nn.Module):
         print(f"bbox_mask = {bbox_mask.shape}")
         print(f"seg_pose = {seg_pose.shape}")
 
-        #if self.method =='simdr':
-        if False:
-            seg_pose = seg_pose.flatten(2) #if not self.no_dec else seg_pose.flatten(3)
-            outputs_x = self.mlp_head_x(seg_pose)
-            outputs_y = self.mlp_head_y(seg_pose)
-            print("pose dr outputs= ", outputs_x.shape, outputs_y.shape)
-            outputs_x = outputs_x.view(bs, self.rftr.num_queries, self.num_joints, self.output_size)
-            outputs_y = outputs_y.view(bs, self.rftr.num_queries, self.num_joints, self.output_size)
-            print("pose dr outputs[x, y]= ", outputs_x.shape, outputs_y.shape)
-            out['x_coord'] = outputs_x
-            out['y_coord'] = outputs_y
-            out['output_size'] = self.output_size
-        elif self.method =='hm':
+        if self.method =='hm':
             outputs_pose_masks = seg_pose.view(bs, self.rftr.num_queries, self.num_joints, self.hm_shape, self.hm_shape)
             out["pred_hm"] = outputs_pose_masks
             print("pose hm outputs= ", outputs_pose_masks.shape)
@@ -357,71 +357,65 @@ class PoseHeadSmallConv(nn.Module):
     Upsampling is done using a FPN approach
     """
 
-    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature='x', roi=False):
+    def __init__(self, dim, context_dim, final_channel, method='simdr', use_feature=[0]):
         super().__init__()
         
+
         self.use_feature = use_feature
         self.method = method
         self.dim = dim
         self.heatmap_size = [64, 64]
-        self.roi = roi
-
+        
+        layer_dim = 16*16 
         inter_dims =[context_dim//2, context_dim // 4, context_dim // 4]   
         if context_dim == 512:
             inter_dims =[context_dim//2, context_dim // 4, context_dim // 8]   
 
-        if use_feature == '16':
+        if 0 not in use_feature:
             #inter_dims =[context_dim //2, context_dim // 4 , context_dim // 4 ]  # 128, 64  64
             inter_dims =[context_dim , context_dim // 2 , context_dim // 2]  # hmdr3  256 128 128
-            self.adapter1 = torch.nn.Conv2d(256, inter_dims[1], 1)
-
-        elif use_feature == '32':
-            inter_dims =[context_dim, context_dim // 2 , (context_dim+256) // 4] 
-            self.adapter1 = torch.nn.Conv2d(
-                in_channels=128, #64,#dims[-1], #self.num_deconv_filters[-1],  # NUM_DECONV_FILTERS[-1]
-                out_channels=inter_dims[1],#=32,  # NUM_JOINTS,
-                kernel_size=2,  # FINAL_CONV_KERNEL
-                stride=2,
-                padding=0  # if FINAL_CONV_KERNEL = 3 else 1
-            )
-        elif use_feature == '128':
-            inter_dims =[context_dim, context_dim // 2 , (context_dim+256) // 4] 
-            adapter_dim = [32, 32, 64, 128]
-            self.adapter1 = nn.ModuleList()
-            for i in range(len(adapter_dim)-1):
-                adapter_layer = nn.Sequential(
-                    nn.Conv2d(in_channels=adapter_dim[i], out_channels=adapter_dim[i+1], kernel_size=2, stride=2),
-                    LayerNorm2d(adapter_dim[i+1], eps=1e-6, data_format="channels_first"),
-                    nn.GELU()
+            
+            print("PoseHead feature size ", use_feature)
+            if 16 in use_feature:
+                dim_add = 128
+                self.adapter = torch.nn.Conv2d(256, dim_add, 1)
+            if 32 in use_feature:
+                dim_add32 = 64
+                self.adapter32 = torch.nn.Conv2d(128, dim_add32, 1)
+                self.mlp_head32 = nn.Sequential(
+                    nn.LayerNorm(layer_dim),
+                    nn.Linear(layer_dim, 16*32),
+                    nn.LayerNorm(16*32),
+                    nn.Linear(16*32, 32*32)
                 )
-                self.adapter1.append(adapter_layer)
-
+ 
 
         print("PoseHead Inter_dims ", inter_dims)
         
-        
-        '''
-        self.lay1 = torch.nn.Conv2d(dim, dim, 3, padding=1)
-        self.gn1 = torch.nn.GroupNorm(8, dim)
-        self.lay2 = torch.nn.Conv2d(dim, inter_dims[1], 3, padding=1)
-        '''
         self.lay1 = torch.nn.Conv2d(dim, inter_dims[0], 3, padding=1)
         self.gn1 = torch.nn.GroupNorm(8, inter_dims[0])
         self.lay2 = torch.nn.Conv2d(inter_dims[0], inter_dims[1], 3, padding=1)
         self.gn2 = torch.nn.GroupNorm(8, inter_dims[1])
 
         #self.lay3 = torch.nn.Conv2d(inter_dims[1]+128, inter_dims[2], 3, padding=1)
-        if use_feature != 'x':
-            inter_dims[1] *= 2 #256
+        if 16 in use_feature:
+            inter_dims[1] += dim_add #256
+        
+        if 32 in use_feature:
+            inter_dims[1] += dim_add32 #256
+            layer_dim = 32*32
+        
+
         self.lay3 = torch.nn.Conv2d(inter_dims[1], inter_dims[2], 3, padding=1)
         self.gn3 = torch.nn.GroupNorm(8, inter_dims[2])
-        
-        dim = 16*16 # 64*4
-        hidden_heatmap_dim = self.heatmap_size[0] * 16
+
+        # 64*4
+        hidden_heatmap_dim = self.heatmap_size[0] * 16      
         heatmap_dim = self.heatmap_size[0]* self.heatmap_size[1]
+
         self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, hidden_heatmap_dim),
+            nn.LayerNorm(layer_dim),
+            nn.Linear(layer_dim, hidden_heatmap_dim),
             nn.LayerNorm(hidden_heatmap_dim),
             nn.Linear(hidden_heatmap_dim, heatmap_dim)
         )
@@ -444,10 +438,9 @@ class PoseHeadSmallConv(nn.Module):
                 nn.init.kaiming_uniform_(m.weight, a=1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x: Tensor, bbox_mask: Tensor, feature: Tensor = None, tgt_feature: Tensor = None):
+    def forward(self, x: Tensor, bbox_mask: Tensor, feature: Tensor = None):
 
         x = torch.cat([_expand(x, bbox_mask.shape[1]), bbox_mask.flatten(0, 1)], 1)
-        gram = None
         x = self.lay1(x)
         x = self.gn1(x)
         x = F.relu(x)
@@ -456,23 +449,19 @@ class PoseHeadSmallConv(nn.Module):
         x = self.gn2(x)
         x = F.relu(x)
         
-        if self.use_feature != 'x':
-            feature = self.adapter1(feature)
-            
-            '''
-            tgt_feature = self.adapter1(tgt_feature)
-            tgt_feature = tgt_feature.flatten(2)
-            src_feature = feature.flatten(2)
-            
-            #gram_x = src_feature @ src_feature.permute(0, 2, 1)
-            #ram_y = tgt_feature @ tgt_feature.permute(0, 2, 1)
-            #gram = (gram_x, gram_y)
-            gram = (src_feature, tgt_feature)
-            '''
+        if 16 in self.use_feature:
+            feature16 = self.adapter(feature[0])
+            feature16 = _expand(feature16, bbox_mask.shape[1])
+            x = torch.cat([x, feature16], dim=1)
 
-            feature = _expand(feature, bbox_mask.shape[1]) if not self.roi else feature
-            x = torch.cat([x, feature], dim=1)
-        
+        if 32 in self.use_feature:
+            feature32 = self.adapter32(feature[1])
+            x = x.flatten(2)
+            x = self.mlp_head32(x)
+            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=32,p2=32)
+            feature32 = _expand(feature32, bbox_mask.shape[1])
+            x = torch.cat([x, feature32], dim=1)
+                    
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
@@ -480,12 +469,11 @@ class PoseHeadSmallConv(nn.Module):
         x = x.flatten(2)
         x = self.mlp_head(x)
         x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=self.heatmap_size[0],p2=self.heatmap_size[1])
+
         x = self.final_layer(x)
         
-        if gram is None:
-            return x
-        else:
-            return x, gram
+        return x
+
 
     def check_dim(self):
         print("____check dim in PoseHeadSmallConv____") # src_proj =  batch, src_proj_c, h, w    bbx_mask = batch, num_queries, nheads, h, w
@@ -506,37 +494,35 @@ class PoseHeadSmallConv(nn.Module):
         x = F.relu(x)
         print("lay2 x ", x.shape) # 80, 128, 8, 8
 
-        if self.use_feature =='16':
-            feature = torch.zeros((4, 256, 16, 16)) if not self.roi else torch.zeros((4*bbox_mask.shape[1], 256, 16, 16))
-            print("feature = ", feature.shape)
-            feature = self.adapter1(feature)
-            print("feature adapater1 = ", feature.shape)
-            feature = _expand(feature, bbox_mask.shape[1]) if not self.roi else feature
-            print("feature expand = ", feature.shape)
-            x = torch.cat([x, feature], dim=1)
-        elif self.use_feature == '32':
-            feature = torch.zeros((4, 128, 32, 32))
-            print("feature = ", feature.shape)
-            feature = self.adapter1(feature)
-            print("feature adapater1 = ", feature.shape)
-            feature = _expand(feature, bbox_mask.shape[1])
-            print("feature expand = ", feature.shape)
-            x = torch.cat([x, feature], dim=1)
-        elif self.use_feature == '128':
-            feature = torch.zeros((4, 32, 128, 128))
-            print("feature = ", feature.shape)
-            for i in range(3):
-                feature = self.adapter1[i](feature)
-                print(f"feature adapater1={i}  = ", feature.shape)
-            feature = _expand(feature, bbox_mask.shape[1])
-            print("feature expand = ", feature.shape)
-            x = torch.cat([x, feature], dim=1)
-        
+        if 16 in self.use_feature:
+            feature16 = torch.zeros((4, 256, 16, 16))
+            print("feature = ", feature16.shape)
+            feature16 = self.adapter(feature16)
+            print("feature16 adapater = ", feature16.shape)
+            feature16 = _expand(feature16, bbox_mask.shape[1])
+            print("feature16 expand = ", feature16.shape)
+            x = torch.cat([x, feature16], dim=1)
+            print("x+feautre = ", x.shape)
+
+        if 32 in self.use_feature:
+            feature32 = torch.zeros((4, 128, 32, 32))
+            print("feature32 = ", feature32.shape)
+            feature32 = self.adapter32(feature32)
+            print("feature32 adapater32 = ", feature32.shape)
+            x = x.flatten(2)
+            x = self.mlp_head32(x)
+            x = rearrange(x,'b c (p1 p2) -> b c p1 p2',p1=32,p2=32)
+            print("x up sample using mlp_had32 = ", x.shape)
+            feature32 = _expand(feature32, bbox_mask.shape[1])
+            print("feature32 expand = ", feature32.shape)
+            x = torch.cat([x, feature32], dim=1)
+            print("x+feautre32 = ", x.shape)
+
+
         x = self.lay3(x)
         x = self.gn3(x)
         x = F.relu(x)
         print("lay3 x ", x.shape) 
-        
         
         x = x.flatten(2)
         x = self.mlp_head(x)
